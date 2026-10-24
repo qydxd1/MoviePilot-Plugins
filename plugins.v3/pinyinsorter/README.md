@@ -19,8 +19,21 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | --- | --- |
 | 插件 ID | `PinyinSorter`（= 类名） |
 | 名称 | 首字母归档 |
-| 版本 | 1.2.0（与 `package.v3.json` 一致） |
+| 版本 | 1.3.0（与 `package.v3.json` 一致） |
 | 入口 | `plugins.v3/pinyinsorter/__init__.py` |
+
+## 立即运行一次
+
+三种触发方式，效果相同（扫描媒体库根目录 → 归档散落目录 → 刷新媒体库）：
+
+1. **插件页按钮**：打开插件详情页，点「立即运行一次」（后台执行，接口立即返回）；
+   同页还有「预览扫描」（只列计划、不动文件）和「刷新媒体库」。
+2. **配置开关**：设置页打开「立即运行一次（保存后执行）」并保存，插件初始化时提交一次后台扫描，
+   然后自动把开关写回关闭。
+3. **API**：`POST /api/v1/plugin/PinyinSorter/run_now`（浏览器登录态，`auth: bear`）。
+
+后台任务优先交给宿主调度器（`app.sdk.scheduler.add_plugin_once_job`），
+调度器不可用时退回独立线程；同一时间只允许一个扫描在跑。
 
 ## 配置项
 
@@ -35,14 +48,25 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | `refresh` | bool | 归档后是否刷新媒体库 |
 | `refresh_mode` | `library` / `item` | 整库扫描或只刷该条目 |
 | `notify` | bool | 归档后是否通过 MoviePilot 通知渠道发消息 |
+| `onlyonce` | bool | 保存后立即运行一次；执行后自动关闭 |
 
-## API（`auth: apikey`，请求头 `X-API-KEY: <API_TOKEN>`）
+## API
+
+外部脚本（`auth: apikey`，请求头 `X-API-KEY: <API_TOKEN>`）：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/plugin/PinyinSorter/records` | 最近 200 条归档记录 |
 | POST | `/api/v1/plugin/PinyinSorter/scan?dry_run=true` | 扫描现有库并预演搬移（默认只预览） |
 | POST | `/api/v1/plugin/PinyinSorter/refresh` | 立即刷新一次媒体库 |
+
+插件页面按钮用（`auth: bear`，浏览器登录态）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/v1/plugin/PinyinSorter/run_now` | 后台立即运行一次（立即返回） |
+| POST | `/api/v1/plugin/PinyinSorter/preview` | 预览扫描，返回计划归档的目录 |
+| POST | `/api/v1/plugin/PinyinSorter/refresh_library` | 刷新媒体库 |
 
 ## 生命周期
 
