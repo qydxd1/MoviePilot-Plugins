@@ -32,6 +32,7 @@ import base64
 import functools
 import re
 import shutil
+import threading
 import zlib
 from datetime import datetime
 from pathlib import Path
@@ -582,7 +583,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
     # 插件版本
-    plugin_version = "1.2.1"
+    plugin_version = "1.3.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -604,6 +605,8 @@ class PinyinSorter(_PluginBase):
     _refresh_mode: str = "library"
     _notify: bool = False
     _records: List[Dict[str, Any]] = []
+    _running: bool = False
+    _config_snapshot: Dict[str, Any] = {}
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -631,6 +634,16 @@ class PinyinSorter(_PluginBase):
         )
         self._notify = bool(config.get("notify", False))
         self._records = self._load_records()
+        self._config_snapshot = dict(config)
+        if config.get("onlyonce"):
+            if self._enabled and self._schedule_once_run():
+                self._config_snapshot["onlyonce"] = False
+                try:
+                    self.update_config(self._config_snapshot)
+                except Exception as error:  # pragma: no cover - 保存失败不阻断
+                    logger.warning("[PinyinSorter] 关闭一次性开关失败：%s", error)
+            elif not self._enabled:
+                logger.warning("[PinyinSorter] 插件未启用，「立即运行一次」已忽略")
         if self._enabled:
             logger.info(
                 "[PinyinSorter] 已启用：电影库 %s，剧集库 %s，首字母来源 %s",
@@ -646,6 +659,79 @@ class PinyinSorter(_PluginBase):
     def stop_service(self) -> None:
         """插件停用/重载/卸载时释放运行状态（本插件没有后台线程或网络连接）。"""
         self._enabled = False
+        self._running = False
+
+    # ------------------------------------------------------------------
+    # 立即运行一次
+    # ------------------------------------------------------------------
+
+    def _schedule_once_run(self) -> bool:
+        """
+        提交一次后台归档扫描（dry_run=False，含媒体库刷新）。
+
+        优先交给宿主调度器，调度器不可用时退回独立线程，保证按钮点下去就有反应。
+
+        :return: 是否已接受本次执行
+        """
+        if self._running:
+            logger.info("[PinyinSorter] 已有扫描在运行，忽略本次「立即运行一次」")
+            return False
+        try:
+            from app.sdk.scheduler import add_plugin_once_job
+
+            accepted = add_plugin_once_job(
+                plugin_id=self.__class__.__name__,
+                job_id=f"{self.__class__.__name__}_run_once",
+                func=self._run_scan_job,
+                name="首字母归档-立即运行一次",
+                delay_seconds=0,
+            )
+            if accepted:
+                logger.info("[PinyinSorter] 已提交后台扫描任务")
+                return True
+        except Exception as error:  # pragma: no cover - 宿主接口变化
+            logger.warning("[PinyinSorter] 宿主调度器不可用，改用线程执行：%s", error)
+        threading.Thread(
+            target=self._run_scan_job,
+            name="PinyinSorterRunOnce",
+            daemon=True,
+        ).start()
+        return True
+
+    def _run_scan_job(self) -> None:
+        """在后台线程中执行一次完整扫描，完成后可选发送通知。"""
+        if self._running:
+            return
+        self._running = True
+        try:
+            summary = anyio.run(self.scan_existing, False)
+            logger.info(
+                "[PinyinSorter] 立即运行完成：扫描根目录 %s，候选 %s，完成 %s，跳过 %s，失败 %s",
+                summary.get("scanned_roots"),
+                summary.get("candidates"),
+                summary.get("done"),
+                summary.get("skipped"),
+                summary.get("failed"),
+            )
+            if self._notify:
+                try:
+                    self.post_message(
+                        mtype="整理完成",
+                        title="【首字母归档】立即运行完成",
+                        text=(
+                            f"扫描根目录 {summary.get('scanned_roots', 0)} 个，"
+                            f"候选 {summary.get('candidates', 0)} 个，"
+                            f"完成 {summary.get('done', 0)}，"
+                            f"跳过 {summary.get('skipped', 0)}，"
+                            f"失败 {summary.get('failed', 0)}"
+                        ),
+                    )
+                except Exception as error:  # pragma: no cover - 通知失败不影响主流程
+                    logger.warning("[PinyinSorter] 发送通知失败：%s", error)
+        except Exception as error:  # pragma: no cover - 文件系统异常
+            logger.error("[PinyinSorter] 立即运行失败：%s", error)
+        finally:
+            self._running = False
 
     # ------------------------------------------------------------------
     # 事件处理
@@ -965,7 +1051,7 @@ class PinyinSorter(_PluginBase):
     # ------------------------------------------------------------------
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """注册插件接口：记录查询、手动扫描、手动刷新。"""
+        """注册插件接口：记录查询、手动扫描、手动刷新、页面按钮。"""
         return [
             {
                 "path": "/records",
@@ -991,6 +1077,30 @@ class PinyinSorter(_PluginBase):
                 "summary": "立即刷新媒体库",
                 "description": "手动触发一次媒体库刷新",
             },
+            {
+                "path": "/run_now",
+                "endpoint": self.run_now,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即运行一次",
+                "description": "提交一次后台归档扫描（含媒体库刷新），立即返回",
+            },
+            {
+                "path": "/preview",
+                "endpoint": self.preview_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "预览扫描",
+                "description": "只列出将要归档的目录，不移动文件",
+            },
+            {
+                "path": "/refresh_library",
+                "endpoint": self.refresh_library,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "刷新媒体库",
+                "description": "给插件页面按钮用：立即刷新一次媒体库",
+            },
         ]
 
     def get_records(self) -> List[Dict[str, Any]]:
@@ -1003,6 +1113,30 @@ class PinyinSorter(_PluginBase):
 
     async def refresh_now(self) -> Dict[str, Any]:
         """手动刷新媒体库。"""
+        await anyio.to_thread.run_sync(self._refresh_media_servers)
+        return {"success": True}
+
+    async def run_now(self) -> Dict[str, Any]:
+        """页面「立即运行一次」按钮：提交后台扫描。"""
+        accepted = self._schedule_once_run()
+        return {
+            "success": accepted,
+            "message": "已提交后台任务" if accepted else "已有扫描在运行",
+        }
+
+    async def preview_scan(self) -> Dict[str, Any]:
+        """页面「预览扫描」按钮：返回将要归档的目录列表，不移动文件。"""
+        summary = await self.scan_existing(dry_run=True)
+        items = summary.get("items") or []
+        return {
+            "success": True,
+            "scanned_roots": summary.get("scanned_roots", 0),
+            "candidates": summary.get("candidates", 0),
+            "items": items[:_RECORD_LIMIT],
+        }
+
+    async def refresh_library(self) -> Dict[str, Any]:
+        """页面「刷新媒体库」按钮。"""
         await anyio.to_thread.run_sync(self._refresh_media_servers)
         return {"success": True}
 
@@ -1037,6 +1171,7 @@ class PinyinSorter(_PluginBase):
             "refresh": self._refresh,
             "refresh_mode": self._refresh_mode,
             "notify": self._notify,
+            "onlyonce": False,
         }
 
     def _build_form(self) -> List[Dict[str, Any]]:
@@ -1109,6 +1244,27 @@ class PinyinSorter(_PluginBase):
                                                 {"title": "仅刷新该条目", "value": "item"},
                                             ],
                                             "hint": "目录搬家后旧路径会失效，整库扫描更干净",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "onlyonce",
+                                            "label": "立即运行一次（保存后执行）",
+                                            "hint": "开启并保存后，后台扫描媒体库根目录、把散落目录归档一次，"
+                                                    "完成后自动关闭该开关",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1224,24 +1380,29 @@ class PinyinSorter(_PluginBase):
         return self._build_page()
 
     def _build_page(self) -> List[Dict[str, Any]]:
-        """构建 Vuetify 状态页。"""
+        """构建 Vuetify 状态页：顶部操作按钮 + 最近归档记录。"""
+        page: List[Dict[str, Any]] = [self._build_page_actions()]
         records = self._records
         if not records:
-            return [
+            page.append(
                 {
                     "component": "VAlert",
                     "props": {
                         "type": "info",
                         "variant": "tonal",
-                        "text": "暂无归档记录。插件启用后，每次整理完成都会在这里留下一条记录。",
+                        "text": (
+                            "暂无归档记录。点上面的「立即运行一次」扫描已有媒体目录，"
+                            "或等下一次整理完成后自动归档。"
+                        ),
                     },
                 }
-            ]
+            )
+            return page
 
         success = sum(1 for item in records if item.get("status") == "success")
         failed = sum(1 for item in records if item.get("status") == "failed")
         skipped = len(records) - success - failed
-        page: List[Dict[str, Any]] = [
+        page.append(
             {
                 "component": "VAlert",
                 "props": {
@@ -1254,7 +1415,7 @@ class PinyinSorter(_PluginBase):
                     "class": "mb-2",
                 },
             }
-        ]
+        )
         for record in records:
             status = record.get("status")
             icon = "✓" if status == "success" else ("→" if status == "skipped" else "✗")
@@ -1296,3 +1457,80 @@ class PinyinSorter(_PluginBase):
                 }
             )
         return page
+
+    def _build_page_actions(self) -> Dict[str, Any]:
+        """构建页面顶部的操作按钮行（点击后由前端调用插件接口）。"""
+        pid = self.__class__.__name__
+        return {
+            "component": "VRow",
+            "props": {"class": "mb-2"},
+            "content": [
+                {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 4},
+                    "content": [
+                        self._page_button(
+                            "立即运行一次",
+                            "mdi-play-circle-outline",
+                            f"{pid}/run_now",
+                            "primary",
+                            "扫描媒体库根目录、归档散落目录并刷新媒体库（后台执行）",
+                        )
+                    ],
+                },
+                {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 4},
+                    "content": [
+                        self._page_button(
+                            "预览扫描",
+                            "mdi-magnify-scan",
+                            f"{pid}/preview",
+                            "secondary",
+                            "只列出将要归档的目录，不移动任何文件",
+                        )
+                    ],
+                },
+                {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 4},
+                    "content": [
+                        self._page_button(
+                            "刷新媒体库",
+                            "mdi-refresh",
+                            f"{pid}/refresh_library",
+                            "secondary",
+                            "立即让 Emby/Jellyfin/Plex 重新扫描媒体库",
+                        )
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _page_button(
+        label: str,
+        icon: str,
+        api_path: str,
+        color: str,
+        tooltip: str,
+    ) -> Dict[str, Any]:
+        """生成一个会调用插件接口的按钮组件。"""
+        return {
+            "component": "VBtn",
+            "props": {
+                "color": color,
+                "variant": "tonal",
+                "block": True,
+                "prepend-icon": icon,
+                "title": tooltip,
+            },
+            "text": label,
+            "events": {
+                "click": {
+                    "api": f"plugin/{api_path}",
+                    "method": "POST",
+                    "params": {},
+                }
+            },
+        }
