@@ -582,11 +582,11 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
     # 插件版本
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     # 插件作者
-    plugin_author = "local"
+    plugin_author = "qydxd1"
     # 作者主页
-    author_url = ""
+    author_url = "https://github.com/qydxd1"
     # 插件配置项ID前缀
     plugin_config_prefix = "pinyinsorter_"
     # 加载顺序
