@@ -344,6 +344,49 @@ try:
     check("config refresh_mode", config["refresh_mode"], "item")
     page = plugin.get_page()
     check("page list", isinstance(page, list) and len(page) >= 2, True)
+
+    # ---- 立即运行一次 ----
+    apis = {item["path"]: item for item in plugin.get_api()}
+    check("api /run_now auth", apis.get("/run_now", {}).get("auth"), "bear")
+    check("api /run_now methods", apis.get("/run_now", {}).get("methods"), ["POST"])
+    check("api /preview auth", apis.get("/preview", {}).get("auth"), "bear")
+    check("api /refresh_library auth", apis.get("/refresh_library", {}).get("auth"), "bear")
+    check("config onlyonce default", config.get("onlyonce"), False)
+
+    buttons = []
+
+    def _collect_buttons(node):
+        if isinstance(node, dict):
+            if node.get("component") == "VBtn":
+                buttons.append(node)
+            for value in node.values():
+                _collect_buttons(value)
+        elif isinstance(node, list):
+            for value in node:
+                _collect_buttons(value)
+
+    _collect_buttons(page)
+    run_button = next((b for b in buttons if b.get("text") == "立即运行一次"), None)
+    check("page has run button", run_button is not None, True)
+    check(
+        "run button api",
+        (run_button or {}).get("events", {}).get("click", {}).get("api"),
+        "plugin/PinyinSorter/run_now",
+    )
+    check("page button count", len(buttons), 3)
+
+    submitted = []
+    original_schedule = plugin._schedule_once_run
+    plugin._schedule_once_run = lambda: (submitted.append(1) or True)
+    result = asyncio.run(plugin.run_now())
+    check("run_now success", result.get("success"), True)
+    check("run_now scheduled", len(submitted), 1)
+
+    plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "onlyonce": True})
+    check("onlyonce submitted", len(submitted), 2)
+    check("onlyonce snapshot reset", plugin._config_snapshot.get("onlyonce"), False)
+    check("onlyonce config saved", plugin._config.get("onlyonce"), False)
+    plugin._schedule_once_run = original_schedule
 finally:
     shutil.rmtree(workdir, ignore_errors=True)
 
