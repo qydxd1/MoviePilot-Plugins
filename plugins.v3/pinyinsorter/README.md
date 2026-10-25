@@ -79,6 +79,11 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 - 文件放到 `Season NN/` 子目录、电影放进 `<标题 (年份)>/` 子目录，与媒体库侧命名一致，
   整理阶段搬目录时结构不变；只有改名，不再额外挪一级目录。
 
+## 订阅下载的兜底
+
+`resource.download` 链式事件偶尔拿不到订阅/批量下载的保存目录（改写没生效），所以插件同时订阅`DownloadAdded` 广播事件：任务进下载器后，按它的实际保存目录补一层首字母目录再改名。
+两条路都会记到状态页；排查时用上面的 `download_events` 接口看最近一次到底走了哪条、为什么跳过。
+
 ## 已有任务迁移
 
 qBittorrent 的规则是：**同一磁力链接已经在列表里时，直接复用旧任务**，新的保存目录不会生效。
@@ -143,6 +148,7 @@ qBittorrent 的规则是：**同一磁力链接已经在列表里时，直接复
 | POST | `/api/v1/plugin/PinyinSorter/run_now` | 后台立即运行一次（立即返回） |
 | POST | `/api/v1/plugin/PinyinSorter/preview` | 预览扫描，返回计划归档的目录 |
 | POST | `/api/v1/plugin/PinyinSorter/refresh_library` | 刷新媒体库 |
+| GET | `/api/v1/plugin/PinyinSorter/download_events` | 最近 20 次 `resource.download` 的处理结论（改写成功 / 跳过原因 / 前后保存目录），排查下载没落字母目录时先看它 |
 
 ## 生命周期
 
