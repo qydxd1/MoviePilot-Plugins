@@ -816,7 +816,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名"
     # 插件版本
-    plugin_version = "1.6.0"
+    plugin_version = "1.7.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -841,6 +841,7 @@ class PinyinSorter(_PluginBase):
     _direct_letter_parent: str = ""
     _direct_letter_categories: List[str] = []
     _rename_download: bool = False
+    _relocate_existing: bool = True
     _rename_threads: set = set()
     _rename_stop: Optional[threading.Event] = None
     _records: List[Dict[str, Any]] = []
@@ -878,6 +879,7 @@ class PinyinSorter(_PluginBase):
             config.get("direct_letter_categories")
         )
         self._rename_download = bool(config.get("rename_download", False))
+        self._relocate_existing = bool(config.get("relocate_existing", True))
         if self._rename_stop is None:
             self._rename_stop = threading.Event()
         else:
@@ -1038,26 +1040,24 @@ class PinyinSorter(_PluginBase):
         data = getattr(event, "event_data", None)
         if not data or getattr(data, "cancel", False):
             return
-        self._maybe_schedule_download_rename(data)
-        if not self._direct_letter:
-            return
-        options = getattr(data, "options", None)
-        if not isinstance(options, dict):
-            return
-        if not self._direct_category_allowed(options.get("media_category")):
-            return
-        title = self._resource_title(data)
-        if not title:
-            return
-        base = self._direct_base_path(options.get("save_path"), data)
-        if not base:
-            return
-        letter = first_letter(title, self._fallback_letter)
-        if not letter:
-            return
-        target = base / letter
-        options["save_path"] = target.as_posix()
-        logger.info("[PinyinSorter] 下载直达：%s → %s", title, options["save_path"])
+        target: Optional[Path] = None
+        if self._direct_letter:
+            options = getattr(data, "options", None)
+            if (
+                isinstance(options, dict)
+                and self._direct_category_allowed(options.get("media_category"))
+            ):
+                title = self._resource_title(data)
+                if title:
+                    base = self._direct_base_path(options.get("save_path"), data)
+                    letter = first_letter(title, self._fallback_letter) if base else ""
+                    if base and letter:
+                        target = base / letter
+                        options["save_path"] = target.as_posix()
+                        logger.info(
+                            "[PinyinSorter] 下载直达：%s → %s", title, options["save_path"]
+                        )
+        self._maybe_schedule_download_rename(data, target)
 
     def _direct_base_path(self, save_path: Any, data: Any) -> Optional[Path]:
         """
@@ -1181,7 +1181,7 @@ class PinyinSorter(_PluginBase):
     # 下载时规范命名
     # ------------------------------------------------------------------
 
-    def _maybe_schedule_download_rename(self, data: Any) -> None:
+    def _maybe_schedule_download_rename(self, data: Any, target: Optional[Path] = None) -> None:
         """
         下载提交阶段安排一次「下载器内改名」。
 
@@ -1189,6 +1189,7 @@ class PinyinSorter(_PluginBase):
         手动粘贴的磁力链接没有识别结果，保持原名。
 
         :param data: resource.download 事件数据
+        :param target: 本次下载期望的保存目录（下载直达算出来的），用于迁移已有任务
         """
         if not self._rename_download:
             return
@@ -1220,6 +1221,7 @@ class PinyinSorter(_PluginBase):
                 media,
                 sorted(episodes),
                 str(getattr(data, "downloader", "") or ""),
+                target.as_posix() if target else "",
             ),
             name="PinyinSorterRename",
             daemon=True,
@@ -1290,15 +1292,20 @@ class PinyinSorter(_PluginBase):
         media: MediaInfo,
         episodes: List[int],
         downloader_name: str,
+        expected_dir: str = "",
     ) -> None:
         """
         后台任务：等元数据到位后，把任务名与视频/字幕文件改成规范命名。
+
+        顺手把下载器里「已经存在、但保存目录不是本次期望目录」的任务迁移过去，
+        避免重下同一资源时因为 qB 直接复用旧任务而落在老目录。
 
         :param hash_value: 种子 infohash
         :param folder: 目标目录名（``标题 (年份)``）
         :param media: 识别出的媒体信息
         :param episodes: 本次下载涉及的集号
         :param downloader_name: 下载器名称
+        :param expected_dir: 本次期望的保存目录（空字符串表示不做迁移）
         """
         title = str(getattr(media, "title", "") or "").strip()
         season = getattr(media, "season", None)
@@ -1314,6 +1321,7 @@ class PinyinSorter(_PluginBase):
             if client is None:
                 self._record_rename(folder, hash_value, "没有可用的 qBittorrent 实例", "failed")
                 return
+            self._relocate_torrent_if_needed(client, hash_value, folder, expected_dir)
             paths = [
                 str(item.get("name") or "")
                 for item in files
@@ -1350,6 +1358,53 @@ class PinyinSorter(_PluginBase):
         except Exception as error:
             logger.warning("[PinyinSorter] 下载时改名失败：%s", error)
             self._record_rename(folder, hash_value, f"改名失败：{error}", "failed")
+
+    def _relocate_torrent_if_needed(
+        self,
+        client: Any,
+        hash_value: str,
+        folder: str,
+        expected_dir: str,
+    ) -> None:
+        """
+        把下载器里已经存在、但保存目录不对的任务迁到本次期望目录。
+
+        qBittorrent 遇到重复 infohash 会直接返回已有任务、不理会新的 save_path，
+        所以「重下同一资源」时实际目录仍是旧的；这里用 set_location 搬一次。
+
+        :param client: qBittorrent 客户端
+        :param hash_value: 种子 infohash
+        :param folder: 目标目录名（只用于记录）
+        :param expected_dir: 本次期望的保存目录
+        """
+        if not self._relocate_existing or not expected_dir:
+            return
+        try:
+            infos = client.torrents_info(torrent_hashes=hash_value) or []
+        except Exception as error:  # pragma: no cover - 只影响迁移，不阻断改名
+            logger.warning("[PinyinSorter] 读取已有任务目录失败：%s", error)
+            return
+        if not infos:
+            return
+        actual = str(getattr(infos[0], "save_path", "") or "").strip().rstrip("/")
+        expected = expected_dir.strip().rstrip("/")
+        if not expected or (actual and actual == expected):
+            return
+        setter = getattr(client, "torrents_set_location", None)
+        if setter is None:
+            logger.warning("[PinyinSorter] 下载器不支持迁移已有任务，跳过")
+            return
+        try:
+            setter(location=expected, torrent_hashes=hash_value)
+        except Exception as error:
+            logger.warning("[PinyinSorter] 迁移已有任务失败：%s", error)
+            self._record_rename(
+                folder, hash_value, f"迁移已有任务失败：{error}", "failed"
+            )
+            return
+        message = f"已有任务从 {actual or '未知目录'} 迁到 {expected}"
+        logger.info("[PinyinSorter] %s", message)
+        self._record_rename(folder, hash_value, message, "success")
 
     def _record_rename(self, folder: str, hash_value: str, message: str, status: str) -> None:
         """把一次下载时改名记到状态页。"""
@@ -1888,6 +1943,7 @@ class PinyinSorter(_PluginBase):
             "direct_letter_parent": self._direct_letter_parent,
             "direct_letter_categories": "、".join(self._direct_letter_categories),
             "rename_download": self._rename_download,
+            "relocate_existing": self._relocate_existing,
             "onlyonce": False,
         }
 
@@ -2101,6 +2157,29 @@ class PinyinSorter(_PluginBase):
                                                     "剧集文件改成「标题 - S01E01」，边下边用新名落盘。"
                                                     "只对 MoviePilot 自己搜索/订阅发起的下载生效；"
                                                     "手动粘贴磁力链接没有识别结果，保持原名",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 5},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "relocate_existing",
+                                            "label": "已有任务迁移",
+                                            "hint": "qBittorrent 遇到同一磁力链接会直接复用已有任务、"
+                                                    "不理会新的保存目录。开启后，插件会把这个已存在任务"
+                                                    "用「设置位置」搬到本次期望的字母目录；"
+                                                    "关闭则只改名、不搬目录",
                                             "persistent-hint": True,
                                         },
                                     }
