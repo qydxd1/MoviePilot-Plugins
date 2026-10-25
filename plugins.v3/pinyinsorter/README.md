@@ -81,7 +81,7 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 
 ## 订阅下载的兜底
 
-`resource.download` 链式事件偶尔拿不到订阅/批量下载的保存目录（改写没生效），所以插件同时订阅`DownloadAdded` 广播事件：任务进下载器后，按它的实际保存目录补一层首字母目录再改名。
+`resource.download` 链式事件偶尔拿不到订阅/批量下载的保存目录（改写没生效），所以插件同时订阅`DownloadAdded` 广播事件：任务进下载器后，按它的实际保存目录补一层首字母目录再改名（事件 payload 是 dict，已按 dict/对象两种形态取值）。
 两条路都会记到状态页；排查时用上面的 `download_events` 接口看最近一次到底走了哪条、为什么跳过。
 
 ## 已有任务迁移
