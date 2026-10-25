@@ -864,7 +864,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.8.1"
+    plugin_version = "1.8.2"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -1463,10 +1463,10 @@ class PinyinSorter(_PluginBase):
         if not self._enabled or not self._rename_download or not self._direct_letter:
             return
         data = event.event_data
-        context = getattr(data, "context", None)
+        context = self._payload_field(data, "context")
         media = getattr(context, "media_info", None)
         title = str(getattr(media, "title", "") or "").strip()
-        hash_value = str(getattr(data, "hash", "") or "").strip().lower()
+        hash_value = str(self._payload_field(data, "hash", "") or "").strip().lower()
         if not media or not title or not hash_value:
             return
         if time.time() - float(PinyinSorter._handled_hashes.get(hash_value) or 0) < 600:
@@ -1480,7 +1480,7 @@ class PinyinSorter(_PluginBase):
         if not folder:
             return
         episodes: List[int] = []
-        for item in getattr(data, "episodes", None) or []:
+        for item in self._payload_field(data, "episodes", []) or []:
             try:
                 episodes.append(int(str(item)))
             except (TypeError, ValueError):
@@ -1492,7 +1492,7 @@ class PinyinSorter(_PluginBase):
                 folder,
                 media,
                 sorted(episodes),
-                str(getattr(data, "downloader", "") or ""),
+                str(self._payload_field(data, "downloader", "") or ""),
                 "",
                 letter,
             ),
@@ -1503,6 +1503,13 @@ class PinyinSorter(_PluginBase):
         thread.start()
         PinyinSorter._handled_hashes[hash_value] = time.time()
         logger.info("[PinyinSorter] 下载器里补字母目录：%s（%s）", folder, hash_value)
+
+    @staticmethod
+    def _payload_field(payload: Any, key: str, default: Any = None) -> Any:
+        """广播事件 payload 可能是对象也可能是 dict，统一按 key 取值。"""
+        if isinstance(payload, dict):
+            return payload.get(key, default)
+        return getattr(payload, key, default)
 
     @staticmethod
     def _letter_target_of(client: Any, hash_value: str, letter: str) -> str:
