@@ -78,6 +78,20 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
   即下载器界面上看到的名字也变；文件已经下载的部分会按新名迁移；
 - 不改目录结构，只改名字——目录归拢仍由 `transfer.complete` 那边的归档负责。
 
+## 已有任务迁移
+
+qBittorrent 的规则是：**同一磁力链接已经在列表里时，直接复用旧任务**，新的保存目录不会生效。
+表现就是「重下同一部片」时它仍落在老目录（比如 `/Media/动画电影` 而不是 `/Media/动画电影/D`）。
+
+开启「已有任务迁移」（默认开）后，后台任务在改名之前会：
+
+1. 读下载器里该任务的 `save_path`；
+2. 与本次期望的字母目录比对，不一致就调「设置位置」把任务搬过去（`torrents/setLocation`，数据跟着走）；
+3. 把「从 X 迁到 Y」记到状态页。
+
+关掉这个开关就只改名、不搬目录。迁移只对 MoviePilot 自己发起的下载生效，
+不会去动下载器里其他来源的任务。
+
 ## 立即运行一次
 
 三种触发方式，效果相同（扫描媒体库根目录 → 归档散落目录 → 刷新媒体库）：
@@ -108,6 +122,7 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | `direct_letter_parent` | string | 兜底父目录：仅当调用方没指定保存目录时使用，绝对路径，支持 `{category}`/`{type}` 模板（例：`/Media/{category}`），渲染后须在下载目录范围内 |
 | `direct_letter_categories` | string | 生效媒体类别（模糊匹配，`、`/逗号分隔，留空=全部） |
 | `rename_download` | bool | 下载时规范命名：任务名改成 `标题 (年份)`、剧集文件改成 `标题 - S01E01`（只对带识别结果的下载生效） |
+| `relocate_existing` | bool | 已有任务迁移：下载器里同 hash 任务若落在老目录，搬到本次期望的字母目录（默认开） |
 | `onlyonce` | bool | 保存后立即运行一次；执行后自动关闭 |
 
 ## API
