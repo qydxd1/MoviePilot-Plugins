@@ -691,19 +691,57 @@ def _join_relative(directory: str, name: str) -> str:
     return f"{directory}/{name}" if directory else name
 
 
+def _season_folder(season: Any) -> str:
+    """
+    生成下载器里的分季目录名：``Season 01``。
+
+    :param season: 季号，缺省按第 1 季
+    :return: 目录名
+    """
+    try:
+        number = int(season)
+    except (TypeError, ValueError):
+        number = 1
+    return f"Season {number:02d}"
+
+
+def _torrent_root(paths: List[str]) -> str:
+    """
+    判断种子是否自带顶层目录（多文件种子通常有，单文件没有）。
+
+    :param paths: 种子文件清单
+    :return: 顶层目录名；散文件种子返回空串
+    """
+    for path in paths:
+        pure = PurePosixPath(path)
+        if len(pure.parts) > 1:
+            return pure.parts[0]
+    return ""
+
+
 def _build_rename_plan(
     paths: List[str],
     title: str,
     season: Any = None,
     episodes: Optional[List[int]] = None,
+    media_type: Any = None,
+    folder: str = "",
 ) -> List[Tuple[str, str]]:
     """
     为种子内的文件生成改名计划（只动视频与配套字幕）。
+
+    目录约定与媒体库保持一致：
+
+    - 电影：文件放进 ``<标题 (年份)>/`` 子目录（种子自带顶层目录时用原目录，
+      之后由任务改名统一成标题目录）；
+    - 剧集：文件按季放进 ``Season 01/``、``Season 02/`` 子目录。
 
     :param paths: 种子文件清单（相对路径，``/`` 分隔）
     :param title: 媒体标题
     :param season: 识别出的季号
     :param episodes: 本次下载涉及的集号（按顺序回填解析不到集号的文件）
+    :param media_type: 媒体类型（``MediaType`` 或字符串），用来区分电影/剧集
+    :param folder: 电影目录名（``标题 (年份)``），散文件种子用它建目录
     :return: ``[(旧相对路径, 新相对路径), ...]``
     """
     videos = [
@@ -712,21 +750,31 @@ def _build_rename_plan(
     ]
     if not videos:
         return []
+    type_text = str(getattr(media_type, "value", media_type) or "").strip().lower()
+    is_tv = type_text in ("tv", "电视剧")
+    root = _torrent_root(paths)
     ordered_videos = sorted(videos)
     season_fallback = season
     episode_pool = list(episodes or [])
-    video_targets: Dict[str, Tuple[str, str]] = {}
+    video_targets: Dict[str, Tuple[str, str, str]] = {}
     plan: List[Tuple[str, str]] = []
     for index, path in enumerate(ordered_videos):
         pure = PurePosixPath(path)
         parsed_season, parsed_episode = _parse_episode(pure.stem)
         episode = parsed_episode
-        if episode is None:
-            episode = episode_pool[index] if index < len(episode_pool) else None
+        if episode is None and index < len(episode_pool):
+            episode = episode_pool[index]
         effective_season = parsed_season if parsed_season is not None else season_fallback
-        new_name = _episode_name(title, effective_season, episode, pure.suffix)
-        new_path = _join_relative(_relative_dir(pure), new_name)
-        video_targets[path] = (pure.stem, PurePosixPath(new_name).stem)
+        if is_tv:
+            new_name = _episode_name(title, effective_season, episode, pure.suffix)
+            base = root
+            if effective_season is not None:
+                base = _join_relative(base, _season_folder(effective_season))
+        else:
+            new_name = f"{folder or title}{pure.suffix}"
+            base = root or folder
+        new_path = _join_relative(base, new_name)
+        video_targets[path] = (base, pure.stem, PurePosixPath(new_name).stem)
         if new_path != path:
             plan.append((path, new_path))
     # 字幕按视频名配对：同目录、文件名以视频名开头
@@ -738,20 +786,20 @@ def _build_rename_plan(
         if pure.suffix.lower() not in _SUBTITLE_EXTS:
             continue
         directory = _relative_dir(pure)
-        match: Optional[Tuple[str, str]] = None
-        for old_video, (old_stem, new_stem) in video_targets.items():
+        match: Optional[Tuple[str, str, str]] = None
+        for old_video, (base, old_stem, new_stem) in video_targets.items():
             if _relative_dir(PurePosixPath(old_video)) != directory:
                 continue
             if pure.stem == old_stem or pure.stem.startswith(old_stem):
-                if match is None or len(old_stem) > len(match[0]):
-                    match = (old_stem, new_stem)
+                if match is None or len(old_stem) > len(match[1]):
+                    match = (base, old_stem, new_stem)
         if not match:
             continue
-        old_stem, new_stem = match
+        base, old_stem, new_stem = match
         tail = pure.stem[len(old_stem):].strip(".-_ ")
         lang = tail if tail and tail.lower() in _SUBTITLE_LANGS else ""
         new_name = f"{new_stem}{'.' + tail if lang else ''}{pure.suffix}"
-        new_path = _join_relative(directory, new_name)
+        new_path = _join_relative(base, new_name)
         if new_path != path:
             plan.append((path, new_path))
     return plan
@@ -814,9 +862,9 @@ class PinyinSorter(_PluginBase):
     # 插件名称
     plugin_name = "首字母归档"
     # 插件描述
-    plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名"
+    plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.7.0"
+    plugin_version = "1.8.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -1327,20 +1375,14 @@ class PinyinSorter(_PluginBase):
                 for item in files
                 if str(item.get("name") or "").strip()
             ]
-            single_file = len(paths) == 1
-            if single_file and PurePosixPath(paths[0]).suffix.lower() in _VIDEO_EXTS:
-                parsed_episode = _parse_episode(paths[0])[1]
-                episode = episodes[0] if episodes else parsed_episode
-                if episode is not None:
-                    new_name = _episode_name(title, season, episode, PurePosixPath(paths[0]).suffix)
-                else:
-                    new_name = f"{folder}{PurePosixPath(paths[0]).suffix}"
-                _rename_torrent(client, hash_value, new_name)
-                _rename_torrent_file(client, hash_value, paths[0], new_name)
-                logger.info("[PinyinSorter] 下载时改名：单文件任务 → %s", new_name)
-                self._record_rename(folder, hash_value, f"单文件任务改名为 {new_name}", "success")
-                return
-            plan = _build_rename_plan(paths, title, season, episodes)
+            plan = _build_rename_plan(
+                paths,
+                title,
+                season,
+                episodes,
+                media_type=getattr(media, "type", None),
+                folder=folder,
+            )
             renamed = 0
             for old_path, new_path in plan:
                 if stop.is_set():
@@ -1460,6 +1502,9 @@ class PinyinSorter(_PluginBase):
             )
             return None
         if not unit.is_dir():
+            if unit.is_file():
+                # 电影常见形态：单个视频文件直接落在库根或首字母目录下
+                return self._archive_file(mediainfo, unit, root, refresh)
             logger.debug("[PinyinSorter] 媒体单元目录不存在，跳过：%s", unit)
             return None
 
@@ -1494,6 +1539,59 @@ class PinyinSorter(_PluginBase):
             logger.warning(
                 "[PinyinSorter] 归档失败：%s → %s（%s）", unit, target, message
             )
+        return record
+
+    def _archive_file(
+        self,
+        mediainfo: MediaInfo,
+        source: Path,
+        root: Path,
+        refresh: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        把单个视频文件包进 ``<首字母>/<标题 (年份)>/`` 目录后再归档。
+
+        电影下载常常只有单个视频文件，直接放进首字母目录会让媒体库出现散文件；
+        这里统一建一个与媒体库一致的标题目录。
+
+        :param mediainfo: 识别出的媒体信息
+        :param source: 待归档的文件
+        :param root: 命中的媒体库根目录
+        :param refresh: 是否需要刷新媒体库
+        :return: 记录字典；跳过时返回 None
+        """
+        title = self._pick_title(mediainfo)
+        letter = first_letter(title or source.stem, self._fallback_letter)
+        if not letter:
+            return None
+        folder = _media_folder_name(title or source.stem, getattr(mediainfo, "year", None))
+        target_dir = root / letter / folder if folder else root / letter
+        target = target_dir / source.name
+        if target == source:
+            logger.debug("[PinyinSorter] 已归档到 %s，跳过：%s", letter, source)
+            return None
+        status, message = self._move_file(source, target)
+        record = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "title": title or source.stem,
+            "letter": letter,
+            "source": str(source),
+            "target": str(target),
+            "status": status,
+            "message": message,
+        }
+        self._append_record(record)
+        if status == "success":
+            logger.info("[PinyinSorter] %s → %s", source, target)
+            if refresh:
+                self._refresh_media_servers(mediainfo, target_dir)
+            if self._notify:
+                self.post_message(
+                    title="首字母归档完成",
+                    text=f"{record['title']}\n{source.name} → {letter}/{folder}/\n{message}",
+                )
+        else:
+            logger.warning("[PinyinSorter] 归档失败：%s → %s（%s）", source, target, message)
         return record
 
     @staticmethod
@@ -1564,7 +1662,9 @@ class PinyinSorter(_PluginBase):
         letter = first_letter(title or media_file.stem, self._fallback_letter)
         if not letter:
             return None
-        target = root / letter / media_file.name
+        folder = _media_folder_name(title or media_file.stem, getattr(mediainfo, "year", None))
+        target_dir = root / letter / folder if folder else root / letter
+        target = target_dir / media_file.name
         if target == media_file:
             logger.debug("[PinyinSorter] 已归档到 %s，跳过：%s", letter, media_file)
             return None
