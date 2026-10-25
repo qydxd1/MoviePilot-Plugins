@@ -864,7 +864,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.8.2"
+    plugin_version = "1.8.3"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -1148,9 +1148,9 @@ class PinyinSorter(_PluginBase):
         )
         self._resource_events = events[-20:]
 
-    def get_resource_events(self) -> List[Dict[str, Any]]:
+    def get_resource_events(self) -> Dict[str, Any]:
         """返回最近 20 次 resource.download 事件的处理情况。"""
-        return list(self._resource_events)
+        return self._envelope(True, "", list(self._resource_events))
 
     def _direct_base_path(self, save_path: Any, data: Any) -> Optional[Path]:
         """
@@ -2090,42 +2090,60 @@ class PinyinSorter(_PluginBase):
             },
         ]
 
-    def get_records(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _envelope(success: bool, message: str = "", data: Any = None) -> Dict[str, Any]:
+        """宿主前端只认严格三键 envelope：success / message / data。"""
+        return {"success": success, "message": message, "data": data}
+
+    def get_records(self) -> Dict[str, Any]:
         """返回最近归档记录。"""
-        return self._records
+        return self._envelope(True, "", list(self._records))
 
     async def scan(self, dry_run: bool = True) -> Dict[str, Any]:
         """扫描并归档已存在的媒体目录（首次迁移用）。"""
-        return await self.scan_existing(dry_run=dry_run)
+        summary = await self.scan_existing(dry_run=dry_run)
+        return self._envelope(True, "扫描完成", summary)
 
     async def refresh_now(self) -> Dict[str, Any]:
         """手动刷新媒体库。"""
-        await anyio.to_thread.run_sync(self._refresh_media_servers)
-        return {"success": True}
+        try:
+            await anyio.to_thread.run_sync(self._refresh_media_servers)
+            return self._envelope(True, "媒体库刷新完成")
+        except Exception as error:
+            logger.warning("[PinyinSorter] 手动刷新媒体库失败：%s", error)
+            return self._envelope(False, f"媒体库刷新失败：{error}")
 
     async def run_now(self) -> Dict[str, Any]:
         """页面「立即运行一次」按钮：提交后台扫描。"""
         accepted = self._schedule_once_run()
-        return {
-            "success": accepted,
-            "message": "已提交后台任务" if accepted else "已有扫描在运行",
-        }
+        return self._envelope(
+            accepted,
+            "已提交后台任务" if accepted else "已有扫描在运行",
+            {"accepted": accepted},
+        )
 
     async def preview_scan(self) -> Dict[str, Any]:
         """页面「预览扫描」按钮：返回将要归档的目录列表，不移动文件。"""
         summary = await self.scan_existing(dry_run=True)
         items = summary.get("items") or []
-        return {
-            "success": True,
-            "scanned_roots": summary.get("scanned_roots", 0),
-            "candidates": summary.get("candidates", 0),
-            "items": items[:_RECORD_LIMIT],
-        }
+        return self._envelope(
+            True,
+            "预览完成",
+            {
+                "scanned_roots": summary.get("scanned_roots", 0),
+                "candidates": summary.get("candidates", 0),
+                "items": items[:_RECORD_LIMIT],
+            },
+        )
 
     async def refresh_library(self) -> Dict[str, Any]:
         """页面「刷新媒体库」按钮。"""
-        await anyio.to_thread.run_sync(self._refresh_media_servers)
-        return {"success": True}
+        try:
+            await anyio.to_thread.run_sync(self._refresh_media_servers)
+            return self._envelope(True, "媒体库刷新完成")
+        except Exception as error:
+            logger.warning("[PinyinSorter] 刷新媒体库失败：%s", error)
+            return self._envelope(False, f"媒体库刷新失败：{error}")
 
     # ------------------------------------------------------------------
     # 插件界面
