@@ -550,6 +550,12 @@ def _gb18030_letter(char: str) -> Optional[str]:
     return _gb18030_first_letters().get(code)
 
 
+def _safe_path_segment(value: str) -> str:
+    """把类别/类型这类配置值收成一个安全的路径片段（去掉路径分隔符）。"""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "", str(value or "")).strip()
+    return "" if cleaned in (".", "..") else cleaned
+
+
 def first_letter(text: Optional[str], fallback: str = "#") -> str:
     """
     计算标题首字母。
@@ -575,6 +581,9 @@ def first_letter(text: Optional[str], fallback: str = "#") -> str:
     return fallback
 
 
+_DIRECT_TEMPLATE_RE = re.compile(r"\{(category|type)\}")
+
+
 class PinyinSorter(_PluginBase):
     """按首字母归档 + 刷新媒体库。"""
 
@@ -583,7 +592,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
     # 插件版本
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -790,7 +799,7 @@ class PinyinSorter(_PluginBase):
         title = self._resource_title(data)
         if not title:
             return
-        parent = self._direct_parent_path()
+        parent = self._direct_parent_path(data)
         if not parent:
             return
         letter = first_letter(title, self._fallback_letter)
@@ -820,17 +829,81 @@ class PinyinSorter(_PluginBase):
             return False
         return any(key and key in value for key in self._direct_letter_categories)
 
-    def _direct_parent_path(self) -> Optional[Path]:
-        """解析「直达父目录」，非绝对路径时告警并放弃覆盖。"""
+    def _direct_parent_path(self, data: Any = None) -> Optional[Path]:
+        """
+        解析「直达父目录」。
+
+        支持模板占位符：``{category}`` 替换为识别出的媒体类别（如「动漫」），
+        ``{type}`` 替换为媒体类型（如「电视剧」）；不含占位符时按普通绝对路径处理。
+
+        :param data: resource.download 事件数据，用于取作用户模板变量的类别/类型
+        :return: 解析后的父目录；模板无法解析或不是绝对路径时返回 None
+        """
         raw = self._direct_letter_parent
         if not raw:
             logger.warning("[PinyinSorter] 下载直达已开启但未填写直达父目录，跳过")
             return None
-        parent = Path(raw)
-        if not parent.is_absolute() and not raw.startswith("/"):
+        rendered = self._render_direct_template(raw, data)
+        if not rendered:
+            return None
+        parent = Path(rendered)
+        if not parent.is_absolute() and not rendered.startswith("/"):
             logger.warning("[PinyinSorter] 直达父目录必须是绝对路径：%s", raw)
             return None
         return parent
+
+    def _render_direct_template(self, raw: str, data: Any = None) -> Optional[str]:
+        """
+        把直达父目录里的 ``{category}`` / ``{type}`` 占位符换成实际值。
+
+        占位符取不到值时放弃本次覆盖（而不是拼出一个错误的路径），
+        避免把文件写进 ``/Media//J`` 这类残缺目录。
+
+        :param raw: 配置的直达父目录
+        :param data: resource.download 事件数据
+        :return: 渲染后的绝对路径；无法渲染时返回 None
+        """
+        if "{" not in raw:
+            return raw
+        values = self._direct_template_values(data)
+        rendered = _DIRECT_TEMPLATE_RE.sub(
+            lambda match: values.get(match.group(1)) or "", raw
+        )
+        if "{" in rendered or "}" in rendered:
+            logger.warning("[PinyinSorter] 直达父目录模板含未知占位符：%s", raw)
+            return None
+        for name in _DIRECT_TEMPLATE_RE.findall(raw):
+            if not values.get(name):
+                logger.warning("[PinyinSorter] 直达父目录模板的 {%s} 取不到值，跳过直达", name)
+                return None
+        segments = [segment for segment in rendered.split("/") if segment]
+        if not segments:
+            logger.warning("[PinyinSorter] 直达父目录模板渲染为空：%s", raw)
+            return None
+        return "/" + "/".join(segments)
+
+    def _direct_template_values(self, data: Any = None) -> Dict[str, str]:
+        """
+        取模板变量：媒体类别与媒体类型。
+
+        :param data: resource.download 事件数据
+        :return: 形如 ``{"category": "动漫", "type": "电视剧"}`` 的字典
+        """
+        context = getattr(data, "context", None)
+        media = getattr(context, "media_info", None)
+        category = ""
+        if data is not None:
+            options = getattr(data, "options", None)
+            if isinstance(options, dict):
+                category = str(options.get("media_category") or "").strip()
+        if not category:
+            category = str(getattr(media, "category", "") or "").strip()
+        media_type_obj = getattr(media, "type", None)
+        media_type = str(getattr(media_type_obj, "value", media_type_obj) or "").strip()
+        return {
+            "category": _safe_path_segment(category),
+            "type": _safe_path_segment(media_type),
+        }
 
     def _handle_media_unit(
         self,
@@ -1434,10 +1507,11 @@ class PinyinSorter(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "direct_letter_parent",
-                                            "label": "直达父目录（绝对路径）",
-                                            "placeholder": "/media/动漫",
-                                            "hint": "填 /media/动漫 则下到 /media/动漫/<首字母>/；"
-                                                    "必须落在目录设置里某条「下载目录」内，"
+                                            "label": "直达父目录（绝对路径，支持 {category}/{type}）",
+                                            "placeholder": "/Media/{category}",
+                                            "hint": "填 /Media/{category} 就按类别直达：/Media/动漫/<首字母>/；"
+                                                    "{type} 为电影/电视剧这类媒体类型。"
+                                                    "该路径必须落在目录设置里某条「下载目录」内，"
                                                     "否则本次下载会被拒绝（保存路径不在允许的下载目录范围内）",
                                             "persistent-hint": True,
                                         },
@@ -1516,7 +1590,8 @@ class PinyinSorter(_PluginBase):
                                                 "不要指向单个影片目录；若库里已配置分类目录导致多级结构，"
                                                 "插件会跳过并写日志，避免误搬分类目录。"
                                                 "开启「下载直达字母目录」后，下载任务一开始就保存到"
-                                                "<直达父目录>/<首字母>/，整理完成后仍按上述结构归档。"
+                                                "<直达父目录>/<首字母>/（父目录可写 {category} 占位符，"
+                                                "按类别直达如 /Media/动漫/J/），整理完成后仍按上述结构归档。"
                                             ),
                                         },
                                     }
