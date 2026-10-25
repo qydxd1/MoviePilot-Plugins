@@ -589,9 +589,17 @@ try:
 
     # ---- 下载时改名任务本身 ----
     class _FakeQb:
-        def __init__(self):
+        def __init__(self, save_path="/Media/动画电影"):
             self.torrent_renames = []
             self.file_renames = []
+            self.locations = []
+            self.info = [types.SimpleNamespace(save_path=save_path)]
+
+        def torrents_info(self, torrent_hashes=None, **kwargs):
+            return list(self.info)
+
+        def torrents_set_location(self, location=None, torrent_hashes=None, **kwargs):
+            self.locations.append((location, torrent_hashes))
 
         def torrents_rename(self, torrent_hash=None, new_torrent_name=None, name=None, **kwargs):
             self.torrent_renames.append(new_torrent_name or name)
@@ -642,6 +650,68 @@ try:
         "job single file renamed",
         fake.file_renames,
         [("My.Movie.2020.1080p.mkv", "我的电影 (2020).mkv")],
+    )
+
+    # ---- 已有任务迁移 ----
+    check("relocate default on", plugin._relocate_existing, True)
+    fake = _FakeQb(save_path="/Media/动画电影")
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "Show/S01E01.mkv"},
+    ]
+    plugin._download_rename_job(
+        "0123456789abcdef0123456789abcdef01234567",
+        "进击的巨人 (2013)",
+        MediaInfo(title="进击的巨人", year=2013, type=MediaType.TV, season=1),
+        [1],
+        "qb",
+        "/Media/动画电影/J",
+    )
+    check(
+        "relocate existing task",
+        fake.locations,
+        [("/Media/动画电影/J", "0123456789abcdef0123456789abcdef01234567")],
+    )
+
+    fake = _FakeQb(save_path="/Media/动画电影/J")
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "Show/S01E01.mkv"},
+    ]
+    plugin._download_rename_job(
+        "0123456789abcdef0123456789abcdef01234567",
+        "进击的巨人 (2013)",
+        MediaInfo(title="进击的巨人", year=2013, type=MediaType.TV, season=1),
+        [1],
+        "qb",
+        "/Media/动画电影/J",
+    )
+    check("relocate skipped when path matches", fake.locations, [])
+
+    plugin._relocate_existing = False
+    fake = _FakeQb(save_path="/Media/动画电影")
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "Show/S01E01.mkv"},
+    ]
+    plugin._download_rename_job(
+        "0123456789abcdef0123456789abcdef01234567",
+        "进击的巨人 (2013)",
+        MediaInfo(title="进击的巨人", year=2013, type=MediaType.TV, season=1),
+        [1],
+        "qb",
+        "/Media/动画电影/J",
+    )
+    check("relocate disabled", fake.locations, [])
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "tv_roots": "",
+            "refresh": True,
+            "refresh_mode": "item",
+            "relocate_existing": True,
+        }
     )
 
     # ---- 界面 ----
