@@ -318,7 +318,7 @@ try:
     asyncio.run(plugin.on_transfer_complete(event))
     check("event moved", (movies / "X" / "肖申克的救赎 (1994)" / "x.mkv").exists(), True)
     check("event refresh default library", server.calls[0][0] if server.calls else None, "root")
-    check("record saved", len(plugin.get_records()), 1)
+    check("record saved", len(plugin.get_records()["data"]), 1)
 
     # 按条目刷新模式
     plugin.init_plugin(
@@ -467,7 +467,7 @@ try:
         options.get("save_path"),
         "/Media/动画电影/W",
     )
-    events = plugin.get_resource_events()
+    events = plugin.get_resource_events()["data"]
     check("download event recorded", events[-1]["reason"] if events else None, "已改写保存目录")
     check(
         "download event after path",
