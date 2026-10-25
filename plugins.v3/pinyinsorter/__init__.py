@@ -43,7 +43,7 @@ from anyio import Path as AsyncPath
 
 from app.schemas.mediaserver import RefreshMediaItem
 from app.schemas.transfer import TransferInfo
-from app.schemas.types import EventType, MediaType
+from app.schemas.types import ChainEventType, EventType, MediaType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 from app.sdk.media import MediaInfo
@@ -583,7 +583,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
     # 插件版本
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -604,6 +604,9 @@ class PinyinSorter(_PluginBase):
     _refresh: bool = True
     _refresh_mode: str = "library"
     _notify: bool = False
+    _direct_letter: bool = False
+    _direct_letter_parent: str = ""
+    _direct_letter_categories: List[str] = []
     _records: List[Dict[str, Any]] = []
     _running: bool = False
     _config_snapshot: Dict[str, Any] = {}
@@ -633,6 +636,11 @@ class PinyinSorter(_PluginBase):
             "item" if str(config.get("refresh_mode") or "library") == "item" else "library"
         )
         self._notify = bool(config.get("notify", False))
+        self._direct_letter = bool(config.get("direct_letter", False))
+        self._direct_letter_parent = str(config.get("direct_letter_parent") or "").strip()
+        self._direct_letter_categories = self._parse_categories(
+            config.get("direct_letter_categories")
+        )
         self._records = self._load_records()
         self._config_snapshot = dict(config)
         if config.get("onlyonce"):
@@ -754,6 +762,75 @@ class PinyinSorter(_PluginBase):
         await anyio.to_thread.run_sync(
             functools.partial(self._handle_media_unit, mediainfo, transferinfo, True)
         )
+
+    @eventmanager.register(ChainEventType.ResourceDownload)
+    def on_resource_download(self, event: Event) -> None:
+        """
+        资源下载提交阶段：把保存目录改写为「直达父目录/首字母」。
+
+        只在开启「下载直达字母目录」、调用方未显式指定保存目录、
+        且媒体类别命中过滤条件时生效；路径必须落在已配置的下载目录内，
+        否则宿主的 save_path 校验会拒绝本次覆盖。
+
+        :param event: resource.download 链式事件
+        """
+        if not self._enabled or not self._direct_letter:
+            return
+        data = getattr(event, "event_data", None)
+        if not data or getattr(data, "cancel", False):
+            return
+        options = getattr(data, "options", None)
+        if not isinstance(options, dict):
+            return
+        if str(options.get("save_path") or "").strip():
+            logger.debug("[PinyinSorter] 调用方已指定保存目录，跳过下载直达")
+            return
+        if not self._direct_category_allowed(options.get("media_category")):
+            return
+        title = self._resource_title(data)
+        if not title:
+            return
+        parent = self._direct_parent_path()
+        if not parent:
+            return
+        letter = first_letter(title, self._fallback_letter)
+        if not letter:
+            return
+        target = parent / letter
+        options["save_path"] = target.as_posix()
+        logger.info("[PinyinSorter] 下载直达：%s → %s", title, options["save_path"])
+
+    def _resource_title(self, data: Any) -> str:
+        """从 resource.download 事件数据里取媒体标题（取不到时退回种子标题）。"""
+        context = getattr(data, "context", None)
+        media = getattr(context, "media_info", None)
+        for attr in ("title", "title_year"):
+            value = str(getattr(media, attr, "") or "").strip()
+            if value:
+                return value
+        torrent = getattr(context, "torrent_info", None)
+        return str(getattr(torrent, "title", "") or "").strip()
+
+    def _direct_category_allowed(self, category: Any) -> bool:
+        """按「媒体类别过滤」判断是否对本次下载生效；过滤为空表示不限制。"""
+        if not self._direct_letter_categories:
+            return True
+        value = str(category or "").strip()
+        if not value:
+            return False
+        return any(key and key in value for key in self._direct_letter_categories)
+
+    def _direct_parent_path(self) -> Optional[Path]:
+        """解析「直达父目录」，非绝对路径时告警并放弃覆盖。"""
+        raw = self._direct_letter_parent
+        if not raw:
+            logger.warning("[PinyinSorter] 下载直达已开启但未填写直达父目录，跳过")
+            return None
+        parent = Path(raw)
+        if not parent.is_absolute() and not raw.startswith("/"):
+            logger.warning("[PinyinSorter] 直达父目录必须是绝对路径：%s", raw)
+            return None
+        return parent
 
     def _handle_media_unit(
         self,
@@ -1159,6 +1236,23 @@ class PinyinSorter(_PluginBase):
                 items.append(path)
         return items
 
+    @staticmethod
+    def _parse_categories(value: Any) -> List[str]:
+        """把逗号/顿号/空格分隔的类别文本解析成去重后的列表。"""
+        if isinstance(value, (list, tuple)):
+            candidates = [str(item) for item in value]
+        else:
+            text = str(value or "")
+            for sep in (",", "，", "、", ";", "；", " "):
+                text = text.replace(sep, "\n")
+            candidates = text.splitlines()
+        items: List[str] = []
+        for raw in candidates:
+            category = raw.strip()
+            if category and category not in items:
+                items.append(category)
+        return items
+
     def get_form(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """返回配置表单与当前配置。"""
         return self._build_form(), {
@@ -1171,6 +1265,9 @@ class PinyinSorter(_PluginBase):
             "refresh": self._refresh,
             "refresh_mode": self._refresh_mode,
             "notify": self._notify,
+            "direct_letter": self._direct_letter,
+            "direct_letter_parent": self._direct_letter_parent,
+            "direct_letter_categories": "、".join(self._direct_letter_categories),
             "onlyonce": False,
         }
 
@@ -1316,6 +1413,60 @@ class PinyinSorter(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "direct_letter",
+                                            "label": "下载直达字母目录",
+                                            "hint": "下载器保存路径直接写成 <直达父目录>/<首字母>",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "direct_letter_parent",
+                                            "label": "直达父目录（绝对路径）",
+                                            "placeholder": "/media/动漫",
+                                            "hint": "填 /media/动漫 则下到 /media/动漫/<首字母>/；"
+                                                    "必须落在目录设置里某条「下载目录」内，"
+                                                    "否则本次下载会被拒绝（保存路径不在允许的下载目录范围内）",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 5},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "direct_letter_categories",
+                                            "label": "生效媒体类别（留空=全部）",
+                                            "placeholder": "动漫",
+                                            "hint": "按识别出的类别模糊匹配，用、或逗号分隔",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
@@ -1364,6 +1515,8 @@ class PinyinSorter(_PluginBase):
                                                 "Emby 等媒体库必须指向库根目录（如 /media/movies），"
                                                 "不要指向单个影片目录；若库里已配置分类目录导致多级结构，"
                                                 "插件会跳过并写日志，避免误搬分类目录。"
+                                                "开启「下载直达字母目录」后，下载任务一开始就保存到"
+                                                "<直达父目录>/<首字母>/，整理完成后仍按上述结构归档。"
                                             ),
                                         },
                                     }
