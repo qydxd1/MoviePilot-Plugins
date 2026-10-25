@@ -344,8 +344,24 @@ try:
     info3 = MediaInfo(title="My Movie", year=2020, type=MediaType.MOVIE, category="电影")
     transfer3 = TransferInfo(file_list_new=[str(root_file)])
     asyncio.run(plugin.on_transfer_complete(Event({"mediainfo": info3, "transferinfo": transfer3})))
-    check("root file archived", (movies / "M" / "My Movie (2020).mkv").exists(), True)
+    check(
+        "root file archived",
+        (movies / "M" / "My Movie (2020)" / "My Movie (2020).mkv").exists(),
+        True,
+    )
     check("root file source gone", root_file.exists(), False)
+
+    # 首字母目录下的单个视频文件也要包进 <标题 (年份)>/
+    loose_file = movies / "L" / "Loose.Movie.2019.mkv"
+    loose_file.parent.mkdir(parents=True, exist_ok=True)
+    loose_file.write_text("l", encoding="utf-8")
+    info4 = MediaInfo(title="Loose Movie", year=2019, type=MediaType.MOVIE, category="电影")
+    plugin._archive_file(info4, loose_file, movies, False)
+    check(
+        "letter dir file wrapped",
+        (movies / "L" / "Loose Movie (2019)" / "Loose.Movie.2019.mkv").exists(),
+        True,
+    )
 
     # ---- 手动扫描 dry_run ----
     loose = movies / "Zeta (2001)"
@@ -500,23 +516,35 @@ try:
         "进击的巨人",
         1,
         [1, 2],
+        media_type="TV",
     )
     check(
         "rename plan video",
-        ("Show/Show.S01E01.1080p.mkv", "Show/进击的巨人 - S01E01.mkv") in plan,
+        ("Show/Show.S01E01.1080p.mkv", "Show/Season 01/进击的巨人 - S01E01.mkv") in plan,
         True,
     )
     check(
         "rename plan subtitle keeps lang",
-        ("Show/Show.S01E01.1080p.chs.ass", "Show/进击的巨人 - S01E01.chs.ass") in plan,
+        ("Show/Show.S01E01.1080p.chs.ass", "Show/Season 01/进击的巨人 - S01E01.chs.ass") in plan,
         True,
     )
     check(
         "rename plan second episode",
-        ("Show/Show.S01E02.1080p.mkv", "Show/进击的巨人 - S01E02.mkv") in plan,
+        ("Show/Show.S01E02.1080p.mkv", "Show/Season 01/进击的巨人 - S01E02.mkv") in plan,
         True,
     )
-    check("rename plan movie single file", plugin_module._build_rename_plan(["A.mkv"], "电影", None, []), [("A.mkv", "电影.mkv")])
+    check(
+        "rename plan movie single file",
+        plugin_module._build_rename_plan(["A.mkv"], "电影", None, [], folder="电影 (2020)"),
+        [("A.mkv", "电影 (2020)/电影 (2020).mkv")],
+    )
+    check(
+        "rename plan tv season folder",
+        plugin_module._build_rename_plan(
+            ["E01.mkv", "E02.mkv"], "剧集", 3, [1, 2], media_type="TV"
+        ),
+        [("E01.mkv", "Season 03/剧集 - S03E01.mkv"), ("E02.mkv", "Season 03/剧集 - S03E02.mkv")],
+    )
 
     def _rename_event(title="进击的巨人", enclosure=None, episodes=None):
         media = MediaInfo(title=title, year=2013, type=MediaType.TV, season=1)
@@ -627,9 +655,9 @@ try:
         "job file renames",
         fake.file_renames,
         [
-            ("Show/Show.S01E01.1080p.mkv", "Show/进击的巨人 - S01E01.mkv"),
-            ("Show/Show.S01E02.1080p.mkv", "Show/进击的巨人 - S01E02.mkv"),
-            ("Show/Show.S01E01.1080p.chs.ass", "Show/进击的巨人 - S01E01.chs.ass"),
+            ("Show/Show.S01E01.1080p.mkv", "Show/Season 01/进击的巨人 - S01E01.mkv"),
+            ("Show/Show.S01E02.1080p.mkv", "Show/Season 01/进击的巨人 - S01E02.mkv"),
+            ("Show/Show.S01E01.1080p.chs.ass", "Show/Season 01/进击的巨人 - S01E01.chs.ass"),
         ],
     )
 
@@ -645,11 +673,11 @@ try:
         [],
         "qb",
     )
-    check("job single file torrent renamed", fake.torrent_renames, ["我的电影 (2020).mkv"])
+    check("job single file torrent renamed", fake.torrent_renames, ["我的电影 (2020)"])
     check(
         "job single file renamed",
         fake.file_renames,
-        [("My.Movie.2020.1080p.mkv", "我的电影 (2020).mkv")],
+        [("My.Movie.2020.1080p.mkv", "我的电影 (2020)/我的电影 (2020).mkv")],
     )
 
     # ---- 已有任务迁移 ----
