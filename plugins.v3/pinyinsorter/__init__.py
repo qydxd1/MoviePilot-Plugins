@@ -592,7 +592,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
     # 插件版本
-    plugin_version = "1.5.0"
+    plugin_version = "1.5.1"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -775,11 +775,18 @@ class PinyinSorter(_PluginBase):
     @eventmanager.register(ChainEventType.ResourceDownload)
     def on_resource_download(self, event: Event) -> None:
         """
-        资源下载提交阶段：把保存目录改写为「直达父目录/首字母」。
+        资源下载提交阶段：把保存目录改写为「基准目录/首字母」。
 
-        只在开启「下载直达字母目录」、调用方未显式指定保存目录、
-        且媒体类别命中过滤条件时生效；路径必须落在已配置的下载目录内，
-        否则宿主的 save_path 校验会拒绝本次覆盖。
+        只在开启「下载直达字母目录」、且媒体类别命中过滤条件时生效。
+
+        基准目录的取法：
+
+        - 调用方已指定保存目录（搜索/订阅下载时很常见）→ 在该目录后追加首字母，
+          这样「保存到 /Media/动画电影」的下载会落到 ``/Media/动画电影/首字母``；
+        - 调用方未指定、但填了「直达父目录」→ 用父目录（支持 ``{category}`` 模板）；
+        - 两者都没有 → 跳过。
+
+        路径必须落在已配置的下载目录内，否则宿主的 save_path 校验会拒绝本次覆盖。
 
         :param event: resource.download 链式事件
         """
@@ -791,23 +798,42 @@ class PinyinSorter(_PluginBase):
         options = getattr(data, "options", None)
         if not isinstance(options, dict):
             return
-        if str(options.get("save_path") or "").strip():
-            logger.debug("[PinyinSorter] 调用方已指定保存目录，跳过下载直达")
-            return
         if not self._direct_category_allowed(options.get("media_category")):
             return
         title = self._resource_title(data)
         if not title:
             return
-        parent = self._direct_parent_path(data)
-        if not parent:
+        base = self._direct_base_path(options.get("save_path"), data)
+        if not base:
             return
         letter = first_letter(title, self._fallback_letter)
         if not letter:
             return
-        target = parent / letter
+        target = base / letter
         options["save_path"] = target.as_posix()
         logger.info("[PinyinSorter] 下载直达：%s → %s", title, options["save_path"])
+
+    def _direct_base_path(self, save_path: Any, data: Any) -> Optional[Path]:
+        """
+        解析「下载直达」的基准目录。
+
+        优先用调用方指定的保存目录（在其后追加首字母）；
+        没有指定时才回落到「直达父目录」配置（支持模板）。
+
+        :param save_path: 事件里已有的保存目录
+        :param data: resource.download 事件数据
+        :return: 基准目录；解析不出来时返回 None
+        """
+        explicit = str(save_path or "").strip()
+        if explicit:
+            base = Path(explicit)
+            if not base.is_absolute() and not explicit.startswith("/"):
+                logger.warning(
+                    "[PinyinSorter] 保存目录不是绝对路径，跳过下载直达：%s", explicit
+                )
+                return None
+            return base
+        return self._direct_parent_path(data)
 
     def _resource_title(self, data: Any) -> str:
         """从 resource.download 事件数据里取媒体标题（取不到时退回种子标题）。"""
@@ -935,6 +961,9 @@ class PinyinSorter(_PluginBase):
 
         unit = self._resolve_unit_dir(root, target_dir)
         if not unit:
+            record = self._handle_root_file(mediainfo, transferinfo, root, refresh)
+            if record is not None:
+                return record
             logger.warning(
                 "[PinyinSorter] 检测到分类目录/多级结构，未自动归档：%s（媒体库根目录 %s）",
                 target_dir,
@@ -1013,6 +1042,89 @@ class PinyinSorter(_PluginBase):
             return None
         unit = root / relative.parts[0]
         return unit if unit == directory else None
+
+    def _handle_root_file(
+        self,
+        mediainfo: MediaInfo,
+        transferinfo: TransferInfo,
+        root: Path,
+        refresh: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        处理整理结果直接落在库根下的单个文件（电影不建文件夹时常见）。
+
+        这种文件没有「一级媒体目录」可搬，改为把文件本身移进
+        ``<root>/<首字母>/``，让它和建了文件夹的电影保持同一层级。
+
+        :param mediainfo: 识别出的媒体信息
+        :param transferinfo: 整理结果
+        :param root: 命中的媒体库根目录
+        :param refresh: 是否需要刷新媒体库
+        :return: 记录字典；不适用时返回 None
+        """
+        media_file: Optional[Path] = None
+        for raw in transferinfo.file_list_new or []:
+            candidate = Path(str(raw))
+            if candidate.parent == root and candidate.is_file():
+                media_file = candidate
+                break
+        if media_file is None:
+            return None
+
+        title = self._pick_title(mediainfo)
+        letter = first_letter(title or media_file.stem, self._fallback_letter)
+        if not letter:
+            return None
+        target = root / letter / media_file.name
+        if target == media_file:
+            logger.debug("[PinyinSorter] 已归档到 %s，跳过：%s", letter, media_file)
+            return None
+
+        status, message = self._move_file(media_file, target)
+        record = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "title": title or media_file.stem,
+            "letter": letter,
+            "source": str(media_file),
+            "target": str(target),
+            "status": status,
+            "message": message,
+        }
+        self._append_record(record)
+        if status == "success":
+            logger.info("[PinyinSorter] %s → %s", media_file, target)
+            if refresh:
+                self._refresh_media_servers(mediainfo, target.parent)
+            if self._notify:
+                self.post_message(
+                    title="首字母归档完成",
+                    text=f"{record['title']}\n{media_file.name} → {letter}/\n{message}",
+                )
+        else:
+            logger.warning(
+                "[PinyinSorter] 归档失败：%s → %s（%s）", media_file, target, message
+            )
+        return record
+
+    def _move_file(self, source: Path, target: Path) -> Tuple[str, str]:
+        """
+        把库根下的单个文件搬进字母目录。
+
+        :return: (状态, 说明)，状态取值 success / skipped / failed
+        """
+        if source == target:
+            return "skipped", "源文件与目标文件相同"
+        if target.exists():
+            return "skipped", "目标文件已存在，未覆盖"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if self._copy_mode == "copy":
+                shutil.copy2(source, target)
+                return "success", "已复制"
+            shutil.move(str(source), str(target))
+            return "success", "已移动"
+        except Exception as error:  # pragma: no cover - IO 错误路径
+            return "failed", f"{type(error).__name__}: {error}"
 
     def _pick_title(self, mediainfo: MediaInfo) -> str:
         """按配置挑选用于计算首字母的标题。"""
@@ -1493,7 +1605,8 @@ class PinyinSorter(_PluginBase):
                                         "props": {
                                             "model": "direct_letter",
                                             "label": "下载直达字母目录",
-                                            "hint": "下载器保存路径直接写成 <直达父目录>/<首字母>",
+                                            "hint": "下载时直接落到 <基准目录>/<首字母>："
+                                                    "有指定保存目录就在其后追加首字母，没有才用下面的父目录",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1507,11 +1620,12 @@ class PinyinSorter(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "direct_letter_parent",
-                                            "label": "直达父目录（绝对路径，支持 {category}/{type}）",
+                                            "label": "直达父目录（仅在没有指定保存目录时使用，支持 {category}/{type}）",
                                             "placeholder": "/Media/{category}",
-                                            "hint": "填 /Media/{category} 就按类别直达：/Media/动漫/<首字母>/；"
-                                                    "{type} 为电影/电视剧这类媒体类型。"
-                                                    "该路径必须落在目录设置里某条「下载目录」内，"
+                                            "hint": "搜索/订阅下载会带上保存目录，那种情况直接在其后追加首字母，"
+                                                    "不需要这里。这里只兜底「调用方没指定保存目录」的下载："
+                                                    "填 /Media/{category} 就是 /Media/动漫/<首字母>/。"
+                                                    "路径必须落在目录设置里某条「下载目录」内，"
                                                     "否则本次下载会被拒绝（保存路径不在允许的下载目录范围内）",
                                             "persistent-hint": True,
                                         },
@@ -1590,8 +1704,13 @@ class PinyinSorter(_PluginBase):
                                                 "不要指向单个影片目录；若库里已配置分类目录导致多级结构，"
                                                 "插件会跳过并写日志，避免误搬分类目录。"
                                                 "开启「下载直达字母目录」后，下载任务一开始就保存到"
-                                                "<直达父目录>/<首字母>/（父目录可写 {category} 占位符，"
-                                                "按类别直达如 /Media/动漫/J/），整理完成后仍按上述结构归档。"
+                                                "<基准目录>/<首字母>/：搜索/订阅下载会带上保存目录，"
+                                                "直接在其后追加首字母；只有调用方没指定保存目录时才用"
+                                                "「直达父目录」（可写 {category} 占位符，如 /Media/动漫/J/）。"
+                                                "整理完成后仍按上述结构归档。"
+                                                "注意：宿主会在目录设置的下载根下自动追加「类别目录」，"
+                                                "所以保存目录本身带类别时（如 /Media/动画电影），"
+                                                "落盘就是 /Media/动画电影/<首字母>/，不会再套一层类别。"
                                             ),
                                         },
                                     }
