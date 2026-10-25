@@ -33,7 +33,9 @@ class EnumValue:
 
 
 MediaType = types.SimpleNamespace(MOVIE=EnumValue("电影"), TV=EnumValue("电视剧"), UNKNOWN=EnumValue("未知"))
-EventType = types.SimpleNamespace(TransferComplete="transfer.complete")
+EventType = types.SimpleNamespace(
+    TransferComplete="transfer.complete", DownloadAdded="download.added"
+)
 ChainEventType = types.SimpleNamespace(ResourceDownload="resource.download")
 
 
@@ -465,6 +467,18 @@ try:
         options.get("save_path"),
         "/Media/动画电影/W",
     )
+    events = plugin.get_resource_events()
+    check("download event recorded", events[-1]["reason"] if events else None, "已改写保存目录")
+    check(
+        "download event after path",
+        events[-1]["save_path_after"] if events else None,
+        "/Media/动画电影/W",
+    )
+    check(
+        "download event before path",
+        events[-1]["save_path_before"] if events else None,
+        "/Media/动画电影",
+    )
 
     plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "direct_letter": True})
     event_data, options = _resource_event("进击的巨人")
@@ -678,6 +692,44 @@ try:
         "job single file renamed",
         fake.file_renames,
         [("My.Movie.2020.1080p.mkv", "我的电影 (2020)/我的电影 (2020).mkv")],
+    )
+
+    # ---- DownloadAdded 兜底：任务进下载器后补字母目录 ----
+    fake = _FakeQb(save_path="/Media/番剧")
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "[ANi] Demon Slayer - 01 [1080P].mp4"},
+    ]
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "rename_download": True,
+            "direct_letter": True,
+            "direct_letter_parent": "/Media/{category}",
+            "direct_letter_categories": "",
+        }
+    )
+    plugin_module.PinyinSorter._handled_hashes.clear()
+    plugin.on_download_added(
+        Event(
+            types.SimpleNamespace(
+                hash="ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                context=types.SimpleNamespace(
+                    media_info=MediaInfo(
+                        title="鬼灭之刃", year=2019, type=MediaType.TV, season=1
+                    )
+                ),
+                episodes=[1],
+                downloader="qb",
+            )
+        )
+    )
+    for thread in list(plugin._rename_threads):
+        thread.join(5)
+    check(
+        "downloadadded relocated to letter",
+        fake.locations,
+        [("/Media/番剧/G", "abcdef0123456789abcdef0123456789abcdef01")],
     )
 
     # ---- 已有任务迁移 ----
