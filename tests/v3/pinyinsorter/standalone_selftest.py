@@ -326,6 +326,15 @@ try:
     check("item mode refresh", server.calls[0][0] if server.calls else None, "items")
     check("item mode moved", (movies / "A" / "阿凡达 (2009)").exists(), True)
 
+    # ---- 电影不建文件夹：整理结果直接落在库根下的单个文件 ----
+    root_file = movies / "My Movie (2020).mkv"
+    root_file.write_text("r", encoding="utf-8")
+    info3 = MediaInfo(title="My Movie", year=2020, type=MediaType.MOVIE, category="电影")
+    transfer3 = TransferInfo(file_list_new=[str(root_file)])
+    asyncio.run(plugin.on_transfer_complete(Event({"mediainfo": info3, "transferinfo": transfer3})))
+    check("root file archived", (movies / "M" / "My Movie (2020).mkv").exists(), True)
+    check("root file source gone", root_file.exists(), False)
+
     # ---- 手动扫描 dry_run ----
     loose = movies / "Zeta (2001)"
     loose.mkdir(parents=True)
@@ -415,7 +424,19 @@ try:
 
     event_data, options = _resource_event("进击的巨人", save_path="/downloads/explicit")
     plugin.on_resource_download(event_data)
-    check("direct respects explicit save_path", options.get("save_path"), "/downloads/explicit")
+    check(
+        "direct appends letter to explicit save_path",
+        options.get("save_path"),
+        "/downloads/explicit/J",
+    )
+
+    event_data, options = _resource_event("我对井底之鱼的无限憧憬", save_path="/Media/动画电影")
+    plugin.on_resource_download(event_data)
+    check(
+        "direct appends letter to category save_path",
+        options.get("save_path"),
+        "/Media/动画电影/W",
+    )
 
     plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "direct_letter": True})
     event_data, options = _resource_event("进击的巨人")
