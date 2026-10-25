@@ -712,16 +712,16 @@ try:
     plugin_module.PinyinSorter._handled_hashes.clear()
     plugin.on_download_added(
         Event(
-            types.SimpleNamespace(
-                hash="ABCDEF0123456789ABCDEF0123456789ABCDEF01",
-                context=types.SimpleNamespace(
+            {
+                "hash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                "context": types.SimpleNamespace(
                     media_info=MediaInfo(
                         title="鬼灭之刃", year=2019, type=MediaType.TV, season=1
                     )
                 ),
-                episodes=[1],
-                downloader="qb",
-            )
+                "episodes": [1],
+                "downloader": "qb",
+            }
         )
     )
     for thread in list(plugin._rename_threads):
