@@ -19,8 +19,26 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | --- | --- |
 | 插件 ID | `PinyinSorter`（= 类名） |
 | 名称 | 首字母归档 |
-| 版本 | 1.3.0（与 `package.v3.json` 一致） |
+| 版本 | 1.4.0（与 `package.v3.json` 一致） |
 | 入口 | `plugins.v3/pinyinsorter/__init__.py` |
+
+## 下载直达字母目录
+
+开启后插件订阅 `resource.download` 链式事件，在种子提交给下载器之前把保存目录改成
+`<直达父目录>/<首字母>/`（例如 `/media/动漫/J/`），下载任务从第一秒就落在字母目录里。
+
+```
+磁力 → resource.download（插件改写 save_path）→ qBittorrent 直接下到 /media/动漫/J/
+     → MoviePilot 整理（同盘 rename）→ 本插件把媒体目录归档到 /media/动漫/J/<标题>/
+```
+
+- 只在 **调用方未显式指定保存目录** 时改写，订阅里手动选的目录优先，不覆盖；
+- 「生效媒体类别」按识别出的类别做模糊匹配（默认 `动漫`），留空表示对所有下载生效；
+- **直达父目录必须落在目录设置里某条「下载目录」范围内**，宿主的 `save_path` 校验会拒绝范围外的路径，
+  本次下载会直接失败并提示「保存路径不在允许的下载目录范围内」，所以填之前先在
+  MoviePilot「设置 → 目录」里确认该路径是下载目录（或它的子目录）；
+- 整理阶段仍按媒体库目录归档一次（同盘是 rename，不产生拷贝），最终结构仍是 `<库根>/<首字母>/<媒体目录>/`；
+  如果只是想最终落到字母目录、并不要求下载器路径本身带字母，用原来的 `transfer.complete` 归档即可。
 
 ## 立即运行一次
 
@@ -48,6 +66,9 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | `refresh` | bool | 归档后是否刷新媒体库 |
 | `refresh_mode` | `library` / `item` | 整库扫描或只刷该条目 |
 | `notify` | bool | 归档后是否通过 MoviePilot 通知渠道发消息 |
+| `direct_letter` | bool | 下载直达：把下载器保存目录改成 `<直达父目录>/<首字母>` |
+| `direct_letter_parent` | string | 直达父目录，绝对路径（例：`/media/动漫`），须在下载目录范围内 |
+| `direct_letter_categories` | string | 生效媒体类别（模糊匹配，`、`/逗号分隔，留空=全部） |
 | `onlyonce` | bool | 保存后立即运行一次；执行后自动关闭 |
 
 ## API
