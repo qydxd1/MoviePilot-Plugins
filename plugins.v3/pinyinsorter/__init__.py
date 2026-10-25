@@ -864,7 +864,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.8.0"
+    plugin_version = "1.8.1"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -893,6 +893,8 @@ class PinyinSorter(_PluginBase):
     _rename_threads: set = set()
     _rename_stop: Optional[threading.Event] = None
     _records: List[Dict[str, Any]] = []
+    _resource_events: List[Dict[str, Any]] = []
+    _handled_hashes: Dict[str, float] = {}
     _running: bool = False
     _config_snapshot: Dict[str, Any] = {}
 
@@ -1088,24 +1090,67 @@ class PinyinSorter(_PluginBase):
         data = getattr(event, "event_data", None)
         if not data or getattr(data, "cancel", False):
             return
+        options = getattr(data, "options", None)
+        before = str(options.get("save_path") or "") if isinstance(options, dict) else ""
+        reason = ""
         target: Optional[Path] = None
-        if self._direct_letter:
-            options = getattr(data, "options", None)
-            if (
-                isinstance(options, dict)
-                and self._direct_category_allowed(options.get("media_category"))
-            ):
-                title = self._resource_title(data)
-                if title:
-                    base = self._direct_base_path(options.get("save_path"), data)
-                    letter = first_letter(title, self._fallback_letter) if base else ""
-                    if base and letter:
-                        target = base / letter
-                        options["save_path"] = target.as_posix()
-                        logger.info(
-                            "[PinyinSorter] 下载直达：%s → %s", title, options["save_path"]
-                        )
+        if not self._direct_letter:
+            reason = "未开启下载直达"
+        elif not isinstance(options, dict):
+            reason = "事件没有 options"
+        elif not self._direct_category_allowed(options.get("media_category")):
+            reason = "媒体类别不在过滤范围"
+        else:
+            title = self._resource_title(data)
+            if not title:
+                reason = "取不到媒体标题"
+            else:
+                base = self._direct_base_path(options.get("save_path"), data)
+                letter = first_letter(title, self._fallback_letter) if base else ""
+                if not base:
+                    reason = "保存目录无法解析"
+                elif not letter:
+                    reason = "首字母计算为空"
+                else:
+                    target = base / letter
+                    options["save_path"] = target.as_posix()
+                    reason = "已改写保存目录"
+                    logger.info(
+                        "[PinyinSorter] 下载直达：%s → %s", title, options["save_path"]
+                    )
+        self._remember_resource_event(data, before, reason)
         self._maybe_schedule_download_rename(data, target)
+
+    def _remember_resource_event(self, data: Any, before: str, reason: str) -> None:
+        """
+        记录最近收到的 resource.download 事件，便于排查「为什么没落字母目录」。
+
+        :param data: 事件数据
+        :param before: 改写前的保存目录
+        :param reason: 处理结论
+        """
+        context = getattr(data, "context", None)
+        media = getattr(context, "media_info", None)
+        torrent = getattr(context, "torrent_info", None)
+        options = getattr(data, "options", None)
+        target = str(options.get("save_path") or "") if isinstance(options, dict) else ""
+        events = list(self._resource_events)
+        events.append(
+            {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "title": str(getattr(media, "title", "") or ""),
+                "category": str(getattr(media, "category", "") or ""),
+                "hash": _torrent_hash(getattr(torrent, "enclosure", None)) or "",
+                "save_path_before": before,
+                "save_path_after": target,
+                "reason": reason,
+            }
+        )
+        self._resource_events = events[-20:]
+
+    def get_resource_events(self) -> List[Dict[str, Any]]:
+        """返回最近 20 次 resource.download 事件的处理情况。"""
+        return list(self._resource_events)
 
     def _direct_base_path(self, save_path: Any, data: Any) -> Optional[Path]:
         """
@@ -1270,12 +1315,14 @@ class PinyinSorter(_PluginBase):
                 sorted(episodes),
                 str(getattr(data, "downloader", "") or ""),
                 target.as_posix() if target else "",
+                first_letter(title, self._fallback_letter) if self._direct_letter else "",
             ),
             name="PinyinSorterRename",
             daemon=True,
         )
         self._rename_threads.add(thread)
         thread.start()
+        PinyinSorter._handled_hashes[hash_value] = time.time()
         logger.info("[PinyinSorter] 已安排下载时改名：%s（%s）", folder, hash_value)
 
     @staticmethod
@@ -1341,6 +1388,7 @@ class PinyinSorter(_PluginBase):
         episodes: List[int],
         downloader_name: str,
         expected_dir: str = "",
+        letter: str = "",
     ) -> None:
         """
         后台任务：等元数据到位后，把任务名与视频/字幕文件改成规范命名。
@@ -1354,6 +1402,7 @@ class PinyinSorter(_PluginBase):
         :param episodes: 本次下载涉及的集号
         :param downloader_name: 下载器名称
         :param expected_dir: 本次期望的保存目录（空字符串表示不做迁移）
+        :param letter: 首字母目录名（给了就在当前保存目录下补一层字母目录）
         """
         title = str(getattr(media, "title", "") or "").strip()
         season = getattr(media, "season", None)
@@ -1369,6 +1418,8 @@ class PinyinSorter(_PluginBase):
             if client is None:
                 self._record_rename(folder, hash_value, "没有可用的 qBittorrent 实例", "failed")
                 return
+            if not expected_dir and letter:
+                expected_dir = self._letter_target_of(client, hash_value, letter)
             self._relocate_torrent_if_needed(client, hash_value, folder, expected_dir)
             paths = [
                 str(item.get("name") or "")
@@ -1400,6 +1451,76 @@ class PinyinSorter(_PluginBase):
         except Exception as error:
             logger.warning("[PinyinSorter] 下载时改名失败：%s", error)
             self._record_rename(folder, hash_value, f"改名失败：{error}", "failed")
+
+    @eventmanager.register(EventType.DownloadAdded)
+    def on_download_added(self, event: Event) -> None:
+        """
+        兜底：resource.download 没生效时，任务进下载器后再补一次字母目录。
+
+        订阅、批量下载等链路偶尔拿不到改写后的保存目录，这里按下载器里的实际
+        保存目录补一层首字母目录，不依赖前面事件是否生效。
+        """
+        if not self._enabled or not self._rename_download or not self._direct_letter:
+            return
+        data = event.event_data
+        context = getattr(data, "context", None)
+        media = getattr(context, "media_info", None)
+        title = str(getattr(media, "title", "") or "").strip()
+        hash_value = str(getattr(data, "hash", "") or "").strip().lower()
+        if not media or not title or not hash_value:
+            return
+        if time.time() - float(PinyinSorter._handled_hashes.get(hash_value) or 0) < 600:
+            return
+        letter = first_letter(title, self._fallback_letter)
+        if not letter:
+            return
+        if not self._direct_category_allowed(str(getattr(media, "category", "") or "")):
+            return
+        folder = _media_folder_name(title, getattr(media, "year", None))
+        if not folder:
+            return
+        episodes: List[int] = []
+        for item in getattr(data, "episodes", None) or []:
+            try:
+                episodes.append(int(str(item)))
+            except (TypeError, ValueError):
+                continue
+        thread = threading.Thread(
+            target=self._download_rename_job,
+            args=(
+                hash_value,
+                folder,
+                media,
+                sorted(episodes),
+                str(getattr(data, "downloader", "") or ""),
+                "",
+                letter,
+            ),
+            name="PinyinSorterRename",
+            daemon=True,
+        )
+        self._rename_threads.add(thread)
+        thread.start()
+        PinyinSorter._handled_hashes[hash_value] = time.time()
+        logger.info("[PinyinSorter] 下载器里补字母目录：%s（%s）", folder, hash_value)
+
+    @staticmethod
+    def _letter_target_of(client: Any, hash_value: str, letter: str) -> str:
+        """按下载器里的实际保存目录，算出它下面该有的首字母目录。"""
+        try:
+            infos = client.torrents_info(torrent_hashes=hash_value) or []
+        except Exception as error:  # pragma: no cover - 只影响迁移
+            logger.debug("[PinyinSorter] 读取任务保存目录失败：%s", error)
+            return ""
+        if not infos:
+            return ""
+        save_path = str(getattr(infos[0], "save_path", "") or "").strip().rstrip("/")
+        if not save_path:
+            return ""
+        current = PurePosixPath(save_path)
+        if current.name.upper() == letter.upper():
+            return ""
+        return (current / letter).as_posix()
 
     def _relocate_torrent_if_needed(
         self,
@@ -1951,6 +2072,14 @@ class PinyinSorter(_PluginBase):
                 "auth": "bear",
                 "summary": "刷新媒体库",
                 "description": "给插件页面按钮用：立即刷新一次媒体库",
+            },
+            {
+                "path": "/download_events",
+                "endpoint": self.get_resource_events,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "最近的下载事件",
+                "description": "返回最近 20 次 resource.download 事件的处理结论，用于排查下载未落字母目录",
             },
         ]
 
