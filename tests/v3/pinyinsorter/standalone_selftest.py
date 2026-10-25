@@ -6,6 +6,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import time
 import types
 
 
@@ -73,12 +74,23 @@ logger = Logger()
 
 
 class MediaInfo:
-    def __init__(self, title="", en_title="", year=2023, type=None, category=None):
+    def __init__(
+        self,
+        title="",
+        en_title="",
+        year=2023,
+        type=None,
+        category=None,
+        season=None,
+        seasons=None,
+    ):
         self.title = title
         self.en_title = en_title
         self.year = year
         self.type = type
         self.category = category
+        self.season = season
+        self.seasons = seasons
 
 
 class PluginBase:
@@ -454,6 +466,117 @@ try:
         ["动漫", "国创", "日本动画"],
     )
 
+    # ---- 下载时规范命名 ----
+    check(
+        "torrent hash hex",
+        plugin_module._torrent_hash(
+            "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=x"
+        ),
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+    check(
+        "torrent hash base32",
+        plugin_module._torrent_hash("magnet:?xt=urn:btih:AEBAGBAFAYDQQCIKBMQEAYDQQCIKBMQE"),
+        "0102030405060708090a0b204060708090a0b204",
+    )
+    check("torrent hash bad base32", plugin_module._torrent_hash("magnet:?xt=urn:btih:SHORT"), None)
+    check("torrent hash not magnet", plugin_module._torrent_hash("https://x/y.torrent"), None)
+    check("media folder name", plugin_module._media_folder_name("进击的巨人", 2013), "进击的巨人 (2013)")
+    check("media folder name no year", plugin_module._media_folder_name("进击的巨人", None), "进击的巨人")
+    check("parse episode SxxEyy", plugin_module._parse_episode("Show.S02E07.1080p"), (2, 7))
+    check("parse episode Exx", plugin_module._parse_episode("[Group] Show - 05 [1080p]"), (None, 5))
+    check("parse episode 第N集", plugin_module._parse_episode("Show 第12集"), (None, 12))
+    check(
+        "episode name",
+        plugin_module._episode_name("进击的巨人", 1, 7, ".mkv"),
+        "进击的巨人 - S01E07.mkv",
+    )
+    plan = plugin_module._build_rename_plan(
+        [
+            "Show/Show.S01E01.1080p.mkv",
+            "Show/Show.S01E01.1080p.chs.ass",
+            "Show/Show.S01E02.1080p.mkv",
+        ],
+        "进击的巨人",
+        1,
+        [1, 2],
+    )
+    check(
+        "rename plan video",
+        ("Show/Show.S01E01.1080p.mkv", "Show/进击的巨人 - S01E01.mkv") in plan,
+        True,
+    )
+    check(
+        "rename plan subtitle keeps lang",
+        ("Show/Show.S01E01.1080p.chs.ass", "Show/进击的巨人 - S01E01.chs.ass") in plan,
+        True,
+    )
+    check(
+        "rename plan second episode",
+        ("Show/Show.S01E02.1080p.mkv", "Show/进击的巨人 - S01E02.mkv") in plan,
+        True,
+    )
+    check("rename plan movie single file", plugin_module._build_rename_plan(["A.mkv"], "电影", None, []), [("A.mkv", "电影.mkv")])
+
+    def _rename_event(title="进击的巨人", enclosure=None, episodes=None):
+        media = MediaInfo(title=title, year=2013, type=MediaType.TV, season=1)
+        context = types.SimpleNamespace(
+            media_info=media,
+            torrent_info=types.SimpleNamespace(enclosure=enclosure),
+        )
+        data = types.SimpleNamespace(
+            context=context,
+            options={"media_category": "动漫"},
+            cancel=False,
+            episodes=set(episodes or [1, 2]),
+            downloader="qb",
+        )
+        return Event(data)
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "rename_download": True,
+        }
+    )
+    scheduled = []
+    original_rename_job = plugin._download_rename_job
+    plugin._download_rename_job = lambda *args, **kwargs: scheduled.append(args)
+    plugin._rename_threads.clear()
+    plugin.on_resource_download(
+        _rename_event(
+            enclosure="magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=x"
+        )
+    )
+    for _ in range(50):
+        if scheduled:
+            break
+        time.sleep(0.02)
+    check("rename scheduled", len(scheduled), 1)
+    check("rename folder arg", scheduled[0][1] if scheduled else None, "进击的巨人 (2013)")
+    check("rename episodes arg", scheduled[0][3] if scheduled else None, [1, 2])
+    plugin._download_rename_job = original_rename_job
+    plugin._rename_threads.clear()
+
+    plugin.on_resource_download(_rename_event(enclosure="https://site/download/1.torrent"))
+    check("rename skipped without magnet", len(scheduled), 1)
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "rename_download": False,
+        }
+    )
+    plugin._download_rename_job = lambda *args, **kwargs: scheduled.append(args)
+    plugin.on_resource_download(
+        _rename_event(
+            enclosure="magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567&dn=x"
+        )
+    )
+    check("rename disabled", len(scheduled), 1)
+    plugin.__dict__.pop("_download_rename_job", None)
     plugin.init_plugin(
         {
             "enabled": True,
@@ -462,6 +585,63 @@ try:
             "refresh": True,
             "refresh_mode": "item",
         }
+    )
+
+    # ---- 下载时改名任务本身 ----
+    class _FakeQb:
+        def __init__(self):
+            self.torrent_renames = []
+            self.file_renames = []
+
+        def torrents_rename(self, torrent_hash=None, new_torrent_name=None, name=None, **kwargs):
+            self.torrent_renames.append(new_torrent_name or name)
+
+        def torrents_rename_file(self, torrent_hash=None, old_path=None, new_path=None, **kwargs):
+            self.file_renames.append((old_path, new_path))
+
+    fake = _FakeQb()
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "Show/Show.S01E01.1080p.mkv"},
+        {"name": "Show/Show.S01E01.1080p.chs.ass"},
+        {"name": "Show/Show.S01E02.1080p.mkv"},
+    ]
+    plugin._rename_stop = None
+    plugin._download_rename_job(
+        "0123456789abcdef0123456789abcdef01234567",
+        "进击的巨人 (2013)",
+        MediaInfo(title="进击的巨人", year=2013, type=MediaType.TV, season=1),
+        [1, 2],
+        "qb",
+    )
+    check("job torrent renamed", fake.torrent_renames, ["进击的巨人 (2013)"])
+    check(
+        "job file renames",
+        fake.file_renames,
+        [
+            ("Show/Show.S01E01.1080p.mkv", "Show/进击的巨人 - S01E01.mkv"),
+            ("Show/Show.S01E02.1080p.mkv", "Show/进击的巨人 - S01E02.mkv"),
+            ("Show/Show.S01E01.1080p.chs.ass", "Show/进击的巨人 - S01E01.chs.ass"),
+        ],
+    )
+
+    fake = _FakeQb()
+    plugin._qb_client = lambda downloader_name: fake
+    plugin._wait_torrent_files = lambda hash_value, downloader_name, timeout=300.0: [
+        {"name": "My.Movie.2020.1080p.mkv"},
+    ]
+    plugin._download_rename_job(
+        "0123456789abcdef0123456789abcdef01234567",
+        "我的电影 (2020)",
+        MediaInfo(title="我的电影", year=2020, type=MediaType.MOVIE),
+        [],
+        "qb",
+    )
+    check("job single file torrent renamed", fake.torrent_renames, ["我的电影 (2020).mkv"])
+    check(
+        "job single file renamed",
+        fake.file_renames,
+        [("My.Movie.2020.1080p.mkv", "我的电影 (2020).mkv")],
     )
 
     # ---- 界面 ----
