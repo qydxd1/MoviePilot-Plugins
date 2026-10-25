@@ -33,9 +33,10 @@ import functools
 import re
 import shutil
 import threading
+import time
 import zlib
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 import anyio
@@ -583,6 +584,229 @@ def first_letter(text: Optional[str], fallback: str = "#") -> str:
 
 _DIRECT_TEMPLATE_RE = re.compile(r"\{(category|type)\}")
 
+# 磁力链接里的 btih：40 位十六进制或 32 位 Base32
+_MAGNET_HASH_RE = re.compile(r"urn:btih:([0-9a-fA-F]{40}|[A-Za-z2-7]{32})")
+
+# 下载时改名：视频/字幕扩展名
+_VIDEO_EXTS = {
+    ".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".m4v", ".wmv", ".flv", ".mov", ".rmvb",
+}
+_SUBTITLE_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".sup"}
+
+# 字幕文件名里常见的语言标记，改名时保留
+_SUBTITLE_LANGS = {
+    "chs", "cht", "sc", "tc", "chi", "zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant",
+    "eng", "en", "jpn", "jp", "ja", "kor", "ko",
+}
+
+# 集数：S01E02 / E02 / EP02 / 第2集
+_EPISODE_RE = re.compile(
+    r"(?:\bS(\d{1,2})[\s._-]*E(\d{1,3})\b|\bE(?:P)?[\s._-]*(\d{1,3})\b|第\s*(\d{1,3})\s*[集话話]|"
+    r"(?:\s-\s|\s·\s)(\d{1,3})(?=[\s._\-\[\(]|$))",
+    re.IGNORECASE,
+)
+
+
+def _torrent_hash(text: Optional[str]) -> Optional[str]:
+    """
+    从磁力链接里取出种子 infohash（小写十六进制）。
+
+    :param text: 磁力链接或其它文本
+    :return: 40 位十六进制 infohash；不是磁力链接时返回 None
+    """
+    match = _MAGNET_HASH_RE.search(str(text or ""))
+    if not match:
+        return None
+    raw = match.group(1)
+    if len(raw) == 32:
+        try:
+            raw = base64.b32decode(raw.upper()).hex()
+        except Exception:
+            return None
+    return raw.lower()
+
+
+def _media_folder_name(title: str, year: Any = None) -> str:
+    """
+    生成下载器里的媒体目录名：``标题 (年份)``，没有年份时只用标题。
+
+    :param title: 媒体标题
+    :param year: 发行年份
+    :return: 安全的目录名；标题为空时返回空串
+    """
+    cleaned = _safe_path_segment(str(title or "").strip())
+    if not cleaned:
+        return ""
+    year_text = str(year or "").strip()
+    return f"{cleaned} ({year_text})" if year_text.isdigit() else cleaned
+
+
+def _parse_episode(text: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    从文件名里解析季号与集号。
+
+    :param text: 文件名或路径
+    :return: ``(季号, 集号)``，解析不到的位为 None
+    """
+    match = _EPISODE_RE.search(str(text or ""))
+    if not match:
+        return None, None
+    if match.group(2):
+        return int(match.group(1)), int(match.group(2))
+    if match.group(3):
+        return None, int(match.group(3))
+    if match.group(4):
+        return None, int(match.group(4))
+    if match.group(5):
+        return None, int(match.group(5))
+    return None, None
+
+
+def _episode_name(title: str, season: Any, episode: Any, suffix: str) -> str:
+    """
+    生成规范的单集文件名：``标题 - S01E02.mkv``。
+
+    没有集号时退化成 ``标题.mkv``（电影）。
+
+    :param title: 媒体标题
+    :param season: 季号，缺省按第 1 季
+    :param episode: 集号
+    :param suffix: 原文件扩展名（含点）
+    :return: 新文件名
+    """
+    if episode is None:
+        return f"{title}{suffix}"
+    season_no = int(season or 1)
+    return f"{title} - S{season_no:02d}E{int(episode):02d}{suffix}"
+
+
+def _relative_dir(path: "PurePosixPath") -> str:
+    """返回相对路径里的目录部分，顶层文件返回空串。"""
+    parent = str(path.parent)
+    return "" if parent in ("", ".") else parent
+
+
+def _join_relative(directory: str, name: str) -> str:
+    """把目录与文件名拼回相对路径。"""
+    return f"{directory}/{name}" if directory else name
+
+
+def _build_rename_plan(
+    paths: List[str],
+    title: str,
+    season: Any = None,
+    episodes: Optional[List[int]] = None,
+) -> List[Tuple[str, str]]:
+    """
+    为种子内的文件生成改名计划（只动视频与配套字幕）。
+
+    :param paths: 种子文件清单（相对路径，``/`` 分隔）
+    :param title: 媒体标题
+    :param season: 识别出的季号
+    :param episodes: 本次下载涉及的集号（按顺序回填解析不到集号的文件）
+    :return: ``[(旧相对路径, 新相对路径), ...]``
+    """
+    videos = [
+        path for path in paths
+        if PurePosixPath(path).suffix.lower() in _VIDEO_EXTS
+    ]
+    if not videos:
+        return []
+    ordered_videos = sorted(videos)
+    season_fallback = season
+    episode_pool = list(episodes or [])
+    video_targets: Dict[str, Tuple[str, str]] = {}
+    plan: List[Tuple[str, str]] = []
+    for index, path in enumerate(ordered_videos):
+        pure = PurePosixPath(path)
+        parsed_season, parsed_episode = _parse_episode(pure.stem)
+        episode = parsed_episode
+        if episode is None:
+            episode = episode_pool[index] if index < len(episode_pool) else None
+        effective_season = parsed_season if parsed_season is not None else season_fallback
+        new_name = _episode_name(title, effective_season, episode, pure.suffix)
+        new_path = _join_relative(_relative_dir(pure), new_name)
+        video_targets[path] = (pure.stem, PurePosixPath(new_name).stem)
+        if new_path != path:
+            plan.append((path, new_path))
+    # 字幕按视频名配对：同目录、文件名以视频名开头
+    handled = {old for old, _ in plan}
+    for path in paths:
+        if path in handled or path in video_targets:
+            continue
+        pure = PurePosixPath(path)
+        if pure.suffix.lower() not in _SUBTITLE_EXTS:
+            continue
+        directory = _relative_dir(pure)
+        match: Optional[Tuple[str, str]] = None
+        for old_video, (old_stem, new_stem) in video_targets.items():
+            if _relative_dir(PurePosixPath(old_video)) != directory:
+                continue
+            if pure.stem == old_stem or pure.stem.startswith(old_stem):
+                if match is None or len(old_stem) > len(match[0]):
+                    match = (old_stem, new_stem)
+        if not match:
+            continue
+        old_stem, new_stem = match
+        tail = pure.stem[len(old_stem):].strip(".-_ ")
+        lang = tail if tail and tail.lower() in _SUBTITLE_LANGS else ""
+        new_name = f"{new_stem}{'.' + tail if lang else ''}{pure.suffix}"
+        new_path = _join_relative(directory, new_name)
+        if new_path != path:
+            plan.append((path, new_path))
+    return plan
+
+
+def _rename_torrent(client: Any, hash_value: str, new_name: str) -> bool:
+    """
+    改下载器里的任务名。
+
+    qBittorrent WebAPI v2.4+ 是 ``POST /api/v2/torrents/rename``（``new_torrent_name``），
+    更老的封装用 ``name``，两种都试。
+
+    :param client: qbittorrentapi 客户端
+    :param hash_value: 种子 infohash
+    :param new_name: 新任务名
+    :return: 是否成功
+    """
+    call = getattr(client, "torrents_rename", None)
+    if call is None:
+        return False
+    for kwargs in (
+        {"torrent_hash": hash_value, "new_torrent_name": new_name},
+        {"torrent_hash": hash_value, "name": new_name},
+    ):
+        try:
+            call(**kwargs)
+            return True
+        except TypeError:
+            continue
+        except Exception as error:  # pragma: no cover - 下载器接口异常
+            logger.warning("[PinyinSorter] 任务改名失败：%s", error)
+            return False
+    return False
+
+
+def _rename_torrent_file(client: Any, hash_value: str, old_path: str, new_path: str) -> bool:
+    """
+    改种子内部的文件名（qBittorrent WebAPI v2.4+ 的 ``torrents/rename``）。
+
+    :param client: qbittorrentapi 客户端
+    :param hash_value: 种子 infohash
+    :param old_path: 种子内的旧相对路径
+    :param new_path: 种子内的新相对路径
+    :return: 是否成功
+    """
+    call = getattr(client, "torrents_rename_file", None)
+    if call is None:
+        return False
+    try:
+        call(torrent_hash=hash_value, old_path=old_path, new_path=new_path)
+        return True
+    except Exception as error:  # pragma: no cover - 下载器接口异常
+        logger.warning("[PinyinSorter] 文件改名失败 %s → %s：%s", old_path, new_path, error)
+        return False
+
 
 class PinyinSorter(_PluginBase):
     """按首字母归档 + 刷新媒体库。"""
@@ -590,9 +814,9 @@ class PinyinSorter(_PluginBase):
     # 插件名称
     plugin_name = "首字母归档"
     # 插件描述
-    plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库"
+    plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名"
     # 插件版本
-    plugin_version = "1.5.1"
+    plugin_version = "1.6.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -616,6 +840,9 @@ class PinyinSorter(_PluginBase):
     _direct_letter: bool = False
     _direct_letter_parent: str = ""
     _direct_letter_categories: List[str] = []
+    _rename_download: bool = False
+    _rename_threads: set = set()
+    _rename_stop: Optional[threading.Event] = None
     _records: List[Dict[str, Any]] = []
     _running: bool = False
     _config_snapshot: Dict[str, Any] = {}
@@ -650,6 +877,11 @@ class PinyinSorter(_PluginBase):
         self._direct_letter_categories = self._parse_categories(
             config.get("direct_letter_categories")
         )
+        self._rename_download = bool(config.get("rename_download", False))
+        if self._rename_stop is None:
+            self._rename_stop = threading.Event()
+        else:
+            self._rename_stop.clear()
         self._records = self._load_records()
         self._config_snapshot = dict(config)
         if config.get("onlyonce"):
@@ -674,9 +906,17 @@ class PinyinSorter(_PluginBase):
         return self._enabled
 
     def stop_service(self) -> None:
-        """插件停用/重载/卸载时释放运行状态（本插件没有后台线程或网络连接）。"""
+        """插件停用/重载/卸载时释放运行状态：停止改名线程。"""
         self._enabled = False
         self._running = False
+        if self._rename_stop is not None:
+            self._rename_stop.set()
+        for thread in list(self._rename_threads):
+            try:
+                thread.join(timeout=1.0)
+            except Exception:  # pragma: no cover - 线程状态异常
+                pass
+        self._rename_threads.clear()
 
     # ------------------------------------------------------------------
     # 立即运行一次
@@ -788,12 +1028,18 @@ class PinyinSorter(_PluginBase):
 
         路径必须落在已配置的下载目录内，否则宿主的 save_path 校验会拒绝本次覆盖。
 
+        这里同时挂上「下载时规范命名」：本事件带识别结果，正好在建任务前拿到
+        媒体标题/年份/季集，稍后由后台线程去下载器里改名。
+
         :param event: resource.download 链式事件
         """
-        if not self._enabled or not self._direct_letter:
+        if not self._enabled:
             return
         data = getattr(event, "event_data", None)
         if not data or getattr(data, "cancel", False):
+            return
+        self._maybe_schedule_download_rename(data)
+        if not self._direct_letter:
             return
         options = getattr(data, "options", None)
         if not isinstance(options, dict):
@@ -930,6 +1176,194 @@ class PinyinSorter(_PluginBase):
             "category": _safe_path_segment(category),
             "type": _safe_path_segment(media_type),
         }
+
+    # ------------------------------------------------------------------
+    # 下载时规范命名
+    # ------------------------------------------------------------------
+
+    def _maybe_schedule_download_rename(self, data: Any) -> None:
+        """
+        下载提交阶段安排一次「下载器内改名」。
+
+        只有本事件带着识别结果（搜索/订阅下载）且种子是磁力链接时才安排：
+        手动粘贴的磁力链接没有识别结果，保持原名。
+
+        :param data: resource.download 事件数据
+        """
+        if not self._rename_download:
+            return
+        context = getattr(data, "context", None)
+        media = getattr(context, "media_info", None)
+        title = str(getattr(media, "title", "") or "").strip()
+        if not media or not title:
+            logger.info("[PinyinSorter] 本次下载没有识别结果，跳过下载时改名")
+            return
+        torrent = getattr(context, "torrent_info", None)
+        hash_value = _torrent_hash(getattr(torrent, "enclosure", None))
+        if not hash_value:
+            logger.info("[PinyinSorter] 拿不到种子 infohash（不是磁力链接），跳过下载时改名")
+            return
+        folder = _media_folder_name(title, getattr(media, "year", None))
+        if not folder:
+            return
+        episodes: List[int] = []
+        for item in getattr(data, "episodes", None) or []:
+            try:
+                episodes.append(int(str(item)))
+            except (TypeError, ValueError):
+                continue
+        thread = threading.Thread(
+            target=self._download_rename_job,
+            args=(
+                hash_value,
+                folder,
+                media,
+                sorted(episodes),
+                str(getattr(data, "downloader", "") or ""),
+            ),
+            name="PinyinSorterRename",
+            daemon=True,
+        )
+        self._rename_threads.add(thread)
+        thread.start()
+        logger.info("[PinyinSorter] 已安排下载时改名：%s（%s）", folder, hash_value)
+
+    @staticmethod
+    def _qb_client(downloader_name: str) -> Any:
+        """
+        取 qBittorrent 客户端实例（改名要走下载器自己的 API）。
+
+        :param downloader_name: 任务提交到的下载器名称，空则取第一个 qBittorrent 实例
+        :return: qbittorrentapi 客户端；没有可用实例时返回 None
+        """
+        from app.sdk.services import DownloaderHelper
+
+        helper = DownloaderHelper()
+        services: Dict[Optional[str], Any] = {}
+        if downloader_name:
+            service = helper.get_service(name=downloader_name)
+            if service is not None and str(getattr(service, "type", "")) == "qbittorrent":
+                services = {service.name: service}
+        if not services:
+            services = helper.get_services(type_filter="qbittorrent") or {}
+        for service in services.values():
+            instance = getattr(service, "instance", None)
+            client = getattr(instance, "qbc", None)
+            if client is not None:
+                return client
+        return None
+
+    def _wait_torrent_files(
+        self,
+        hash_value: str,
+        downloader_name: str,
+        timeout: float = 300.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        等下载器拿到种子元数据（文件清单）。
+
+        :param hash_value: 种子 infohash
+        :param downloader_name: 下载器名称
+        :param timeout: 最长等待秒数
+        :return: 文件清单；超时或任务不存在时为空列表
+        """
+        stop = self._rename_stop or threading.Event()
+        deadline = time.time() + timeout
+        while not stop.is_set() and time.time() < deadline:
+            client = self._qb_client(downloader_name)
+            if client is not None:
+                try:
+                    infos = client.torrents_info(torrent_hashes=hash_value) or []
+                    if infos:
+                        files = client.torrents_files(torrent_hash=hash_value) or []
+                        if files:
+                            return [item for item in files if isinstance(item, dict)]
+                except Exception as error:  # pragma: no cover - 下载器接口异常
+                    logger.debug("[PinyinSorter] 读取下载任务失败：%s", error)
+            stop.wait(5)
+        return []
+
+    def _download_rename_job(
+        self,
+        hash_value: str,
+        folder: str,
+        media: MediaInfo,
+        episodes: List[int],
+        downloader_name: str,
+    ) -> None:
+        """
+        后台任务：等元数据到位后，把任务名与视频/字幕文件改成规范命名。
+
+        :param hash_value: 种子 infohash
+        :param folder: 目标目录名（``标题 (年份)``）
+        :param media: 识别出的媒体信息
+        :param episodes: 本次下载涉及的集号
+        :param downloader_name: 下载器名称
+        """
+        title = str(getattr(media, "title", "") or "").strip()
+        season = getattr(media, "season", None)
+        try:
+            files = self._wait_torrent_files(hash_value, downloader_name)
+            stop = self._rename_stop or threading.Event()
+            if stop.is_set():
+                return
+            if not files:
+                self._record_rename(folder, hash_value, "没等到任务元数据", "skipped")
+                return
+            client = self._qb_client(downloader_name)
+            if client is None:
+                self._record_rename(folder, hash_value, "没有可用的 qBittorrent 实例", "failed")
+                return
+            paths = [
+                str(item.get("name") or "")
+                for item in files
+                if str(item.get("name") or "").strip()
+            ]
+            single_file = len(paths) == 1
+            if single_file and PurePosixPath(paths[0]).suffix.lower() in _VIDEO_EXTS:
+                parsed_episode = _parse_episode(paths[0])[1]
+                episode = episodes[0] if episodes else parsed_episode
+                if episode is not None:
+                    new_name = _episode_name(title, season, episode, PurePosixPath(paths[0]).suffix)
+                else:
+                    new_name = f"{folder}{PurePosixPath(paths[0]).suffix}"
+                _rename_torrent(client, hash_value, new_name)
+                _rename_torrent_file(client, hash_value, paths[0], new_name)
+                logger.info("[PinyinSorter] 下载时改名：单文件任务 → %s", new_name)
+                self._record_rename(folder, hash_value, f"单文件任务改名为 {new_name}", "success")
+                return
+            plan = _build_rename_plan(paths, title, season, episodes)
+            renamed = 0
+            for old_path, new_path in plan:
+                if stop.is_set():
+                    return
+                if _rename_torrent_file(client, hash_value, old_path, new_path):
+                    renamed += 1
+            _rename_torrent(client, hash_value, folder)
+            logger.info(
+                "[PinyinSorter] 下载时改名：%s（文件 %s 个）",
+                folder,
+                renamed,
+            )
+            message = f"任务名改为 {folder}，文件改名 {renamed} 个"
+            self._record_rename(folder, hash_value, message, "success")
+        except Exception as error:
+            logger.warning("[PinyinSorter] 下载时改名失败：%s", error)
+            self._record_rename(folder, hash_value, f"改名失败：{error}", "failed")
+
+    def _record_rename(self, folder: str, hash_value: str, message: str, status: str) -> None:
+        """把一次下载时改名记到状态页。"""
+        self._append_record(
+            {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "title": folder or hash_value,
+                "letter": "下载时改名",
+                "status": status,
+                "source": hash_value,
+                "target": folder,
+                "message": message,
+            }
+        )
 
     def _handle_media_unit(
         self,
@@ -1453,6 +1887,7 @@ class PinyinSorter(_PluginBase):
             "direct_letter": self._direct_letter,
             "direct_letter_parent": self._direct_letter_parent,
             "direct_letter_categories": "、".join(self._direct_letter_categories),
+            "rename_download": self._rename_download,
             "onlyonce": False,
         }
 
@@ -1655,6 +2090,29 @@ class PinyinSorter(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 5},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "rename_download",
+                                            "label": "下载时规范命名",
+                                            "hint": "任务一提交就按识别结果改名：目录改成「标题 (年份)」，"
+                                                    "剧集文件改成「标题 - S01E01」，边下边用新名落盘。"
+                                                    "只对 MoviePilot 自己搜索/订阅发起的下载生效；"
+                                                    "手动粘贴磁力链接没有识别结果，保持原名",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
@@ -1711,6 +2169,9 @@ class PinyinSorter(_PluginBase):
                                                 "注意：宿主会在目录设置的下载根下自动追加「类别目录」，"
                                                 "所以保存目录本身带类别时（如 /Media/动画电影），"
                                                 "落盘就是 /Media/动画电影/<首字母>/，不会再套一层类别。"
+                                                "开启「下载时规范命名」后，任务一提交就按识别结果改名："
+                                                "目录为「标题 (年份)」，剧集文件为「标题 - S01E01」，"
+                                                "下载器里看到的就是规范名（手动磁力链接不改）。"
                                             ),
                                         },
                                     }
