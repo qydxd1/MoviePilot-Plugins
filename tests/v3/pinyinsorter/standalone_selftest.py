@@ -364,6 +364,51 @@ try:
     plugin.on_resource_download(event_data)
     check("direct save_path", options.get("save_path"), "/media/动漫/J")
 
+    # ---- 模板：按类别直达 /Media/<类别>/<首字母> ----
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "direct_letter": True,
+            "direct_letter_parent": "/Media/{category}",
+            "direct_letter_categories": "",
+        }
+    )
+    event_data, options = _resource_event("进击的巨人", category="动漫")
+    plugin.on_resource_download(event_data)
+    check("direct template category", options.get("save_path"), "/Media/动漫/J")
+
+    event_data, options = _resource_event("鬼灭之刃", category="电影")
+    plugin.on_resource_download(event_data)
+    check("direct template category 2", options.get("save_path"), "/Media/电影/G")
+
+    event_data, options = _resource_event("进击的巨人", category="")
+    plugin.on_resource_download(event_data)
+    check("direct template missing category skipped", options.get("save_path"), None)
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "direct_letter": True,
+            "direct_letter_parent": "/Media/{unknown}",
+            "direct_letter_categories": "",
+        }
+    )
+    event_data, options = _resource_event("进击的巨人", category="动漫")
+    plugin.on_resource_download(event_data)
+    check("direct unknown placeholder skipped", options.get("save_path"), None)
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "direct_letter": True,
+            "direct_letter_parent": "/media/动漫",
+            "direct_letter_categories": "动漫",
+        }
+    )
+
     event_data, options = _resource_event("鬼灭之刃", category="电影")
     plugin.on_resource_download(event_data)
     check("direct category filtered", options.get("save_path"), None)
