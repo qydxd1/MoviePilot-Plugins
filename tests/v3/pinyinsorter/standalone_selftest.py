@@ -33,6 +33,7 @@ class EnumValue:
 
 MediaType = types.SimpleNamespace(MOVIE=EnumValue("电影"), TV=EnumValue("电视剧"), UNKNOWN=EnumValue("未知"))
 EventType = types.SimpleNamespace(TransferComplete="transfer.complete")
+ChainEventType = types.SimpleNamespace(ResourceDownload="resource.download")
 
 
 class Event:
@@ -167,7 +168,7 @@ async def run_sync(fn, *args, **kwargs):
 mod("app")
 mod("app.schemas")
 mod("app.sdk")
-mod("app.schemas.types", MediaType=MediaType, EventType=EventType)
+mod("app.schemas.types", MediaType=MediaType, EventType=EventType, ChainEventType=ChainEventType)
 mod("app.schemas.transfer", TransferInfo=TransferInfo, FileItem=FileItem)
 mod("app.schemas.mediaserver", RefreshMediaItem=RefreshMediaItem)
 mod("app.sdk.events", Event=Event, eventmanager=eventmanager)
@@ -336,6 +337,66 @@ try:
 
     summary = asyncio.run(plugin.scan_existing(dry_run=False))
     check("scan moved", (movies / "Z" / "Zeta (2001)").exists(), True)
+
+    # ---- 下载直达字母目录 ----
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "direct_letter": True,
+            "direct_letter_parent": "/media/动漫",
+            "direct_letter_categories": "动漫",
+        }
+    )
+
+    def _resource_event(title, category="动漫", save_path=None):
+        options = {"media_category": category}
+        if save_path:
+            options["save_path"] = save_path
+        data = types.SimpleNamespace(
+            context=types.SimpleNamespace(media_info=MediaInfo(title=title)),
+            options=options,
+            cancel=False,
+        )
+        return Event(data), options
+
+    event_data, options = _resource_event("进击的巨人")
+    plugin.on_resource_download(event_data)
+    check("direct save_path", options.get("save_path"), "/media/动漫/J")
+
+    event_data, options = _resource_event("鬼灭之刃", category="电影")
+    plugin.on_resource_download(event_data)
+    check("direct category filtered", options.get("save_path"), None)
+
+    event_data, options = _resource_event("进击的巨人", save_path="/downloads/explicit")
+    plugin.on_resource_download(event_data)
+    check("direct respects explicit save_path", options.get("save_path"), "/downloads/explicit")
+
+    plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "direct_letter": True})
+    event_data, options = _resource_event("进击的巨人")
+    plugin.on_resource_download(event_data)
+    check("direct blank parent ignored", options.get("save_path"), None)
+
+    plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "direct_letter": False})
+    event_data, options = _resource_event("进击的巨人")
+    plugin.on_resource_download(event_data)
+    check("direct disabled", options.get("save_path"), None)
+
+    check(
+        "parse_categories",
+        plugin._parse_categories("动漫、国创, 日本动画"),
+        ["动漫", "国创", "日本动画"],
+    )
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "tv_roots": "",
+            "refresh": True,
+            "refresh_mode": "item",
+        }
+    )
 
     # ---- 界面 ----
     form, config = plugin.get_form()
