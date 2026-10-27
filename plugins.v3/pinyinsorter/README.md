@@ -19,7 +19,7 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | --- | --- |
 | 插件 ID | `PinyinSorter`（= 类名） |
 | 名称 | 首字母归档 |
-| 版本 | 1.11.0（与 `package.v3.json` 一致） |
+| 版本 | 1.12.0（与 `package.v3.json` 一致） |
 | 入口 | `plugins.v3/pinyinsorter/__init__.py` |
 | 数据 | `plugins.v3/pinyinsorter/gb18030_table.py`（GB18030 首字母表，base64 数据块） |
 
