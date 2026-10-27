@@ -340,6 +340,25 @@ try:
     check("item mode refresh", server.calls[0][0] if server.calls else None, "items")
     check("item mode moved", (movies / "A" / "阿凡达 (2009)").exists(), True)
 
+    # 入库即刷新：目录本来就在字母目录里（不搬动）也要刷新
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "movie_roots": str(movies),
+            "tv_roots": "",
+            "refresh": True,
+        }
+    )
+    server.calls.clear()
+    in_place = movies / "D" / "盗梦空间 (2010)"
+    in_place.mkdir(parents=True)
+    (in_place / "d.mkv").write_text("d", encoding="utf-8")
+    info4 = MediaInfo(title="盗梦空间", year=2010, type=MediaType.MOVIE, category="电影")
+    transfer4 = TransferInfo(target_diritem=FileItem(str(in_place)))
+    asyncio.run(plugin.on_transfer_complete(Event({"mediainfo": info4, "transferinfo": transfer4})))
+    check("in-place still refreshes", server.calls[0][0] if server.calls else None, "root")
+    check("in-place not moved again", (movies / "D" / "盗梦空间 (2010)" / "d.mkv").exists(), True)
+
     # ---- 电影不建文件夹：整理结果直接落在库根下的单个文件 ----
     root_file = movies / "My Movie (2020).mkv"
     root_file.write_text("r", encoding="utf-8")
