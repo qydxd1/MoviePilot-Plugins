@@ -48,7 +48,7 @@ moviepilot-local-plugins/
 ```
 
 插件按官方 [V3 插件开发指南](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md) 编写：
-`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.11.0），
+`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.12.0），
 `history` 当前版本在最上面；只从 `app.sdk.*` 导入；外部 API 声明 `auth: "apikey"`，
 页面按钮用 `auth: "bear"`；**零第三方依赖**（不需要 `pip install` 任何东西）。
 
