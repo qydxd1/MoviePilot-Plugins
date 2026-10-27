@@ -47,7 +47,7 @@ moviepilot-local-plugins/
 ```
 
 插件按官方 [V3 插件开发指南](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md) 编写：
-`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.8.3），
+`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.9.0），
 `history` 当前版本在最上面；只从 `app.sdk.*` 导入；外部 API 声明 `auth: "apikey"`，
 页面按钮用 `auth: "bear"`；**零第三方依赖**（不需要 `pip install` 任何东西）。
 
@@ -130,7 +130,7 @@ moviepilot-local-plugins/
 | 首字母来源 | `中文标题`（转拼音首字母，默认）/ `英文标题`（`en_title` 为空时回退中文标题） |
 | 数字/符号归类目录 | 标题以数字/符号开头时归到这里，默认 `#` |
 | 整理方式 | `移动`（默认，省空间）/ `复制`（保留源文件，适合继续做种） |
-| 归档后刷新媒体库 | 默认开。搬完调用媒体服务器刷新 |
+| 入库后自动刷新媒体库 | 默认开。每次整理完成（入库）就调媒体服务器刷新，不要求确实搬动过目录 |
 | 刷新方式 | `整库扫描`（推荐：目录搬家后旧路径失效，整库扫描会把旧条目清掉）/ `仅刷新该条目` |
 | 发送通知 | 归档完成后通过 MoviePilot 通知渠道发一条消息 |
 | 立即运行一次 | 打开并保存后，后台立刻扫描媒体库根目录归档一次，执行完自动关闭 |
