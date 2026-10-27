@@ -193,9 +193,15 @@ mod("app.sdk.services", MediaServerHelper=MediaServerHelper, RefreshMediaItem=Re
 mod("anyio", Path=APath, to_thread=types.SimpleNamespace(run_sync=run_sync))
 
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[3]
-PLUGIN_PATH = PLUGIN_ROOT / "plugins.v3" / "pinyinsorter" / "__init__.py"
-spec = importlib.util.spec_from_file_location("pinyinsorter", PLUGIN_PATH)
+PACKAGE_DIR = PLUGIN_ROOT / "plugins.v3" / "pinyinsorter"
+PLUGIN_PATH = PACKAGE_DIR / "__init__.py"
+spec = importlib.util.spec_from_file_location(
+    "pinyinsorter",
+    PLUGIN_PATH,
+    submodule_search_locations=[str(PACKAGE_DIR)],
+)
 plugin_module = importlib.util.module_from_spec(spec)
+sys.modules["pinyinsorter"] = plugin_module
 spec.loader.exec_module(plugin_module)
 print("import ok")
 
