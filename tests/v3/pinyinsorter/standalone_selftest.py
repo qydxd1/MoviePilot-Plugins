@@ -359,6 +359,32 @@ try:
     check("in-place still refreshes", server.calls[0][0] if server.calls else None, "root")
     check("in-place not moved again", (movies / "D" / "盗梦空间 (2010)" / "d.mkv").exists(), True)
 
+    # ---- 硬链接整理 ----
+    plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "copy_mode": "hardlink"})
+    link_src = movies / "硬链源 (2019)"
+    link_src.mkdir(parents=True)
+    (link_src / "l.mkv").write_text("link", encoding="utf-8")
+    inode = (link_src / "l.mkv").stat().st_ino
+    link_status, link_msg = plugin._move_dir(link_src, movies / "Y" / "硬链源 (2019)")
+    check("hardlink status", link_status, "success")
+    check("hardlink source gone", link_src.exists(), False)
+    check("hardlink inode same", (movies / "Y" / "硬链源 (2019)" / "l.mkv").stat().st_ino, inode)
+    check("hardlink message", "硬链接" in link_msg, True)
+
+    # ---- 入库后延迟刷新 ----
+    plugin.init_plugin({"enabled": True, "movie_roots": str(movies), "refresh": True})
+    plugin._refresh_delay = 0.2
+    server.calls.clear()
+    delay_dir = movies / "E" / "延迟测试 (2021)"
+    delay_dir.mkdir(parents=True)
+    (delay_dir / "e.mkv").write_text("e", encoding="utf-8")
+    info5 = MediaInfo(title="延迟测试", year=2021, type=MediaType.MOVIE, category="电影")
+    transfer5 = TransferInfo(target_diritem=FileItem(str(delay_dir)))
+    asyncio.run(plugin.on_transfer_complete(Event({"mediainfo": info5, "transferinfo": transfer5})))
+    check("delay no immediate refresh", len(server.calls), 0)
+    time.sleep(0.6)
+    check("delay refresh fired", server.calls[0][0] if server.calls else None, "root")
+
     # ---- 电影不建文件夹：整理结果直接落在库根下的单个文件 ----
     root_file = movies / "My Movie (2020).mkv"
     root_file.write_text("r", encoding="utf-8")
