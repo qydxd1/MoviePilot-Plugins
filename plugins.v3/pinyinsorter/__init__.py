@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import os
 import re
 import shutil
 import threading
@@ -864,7 +865,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.9.0"
+    plugin_version = "1.10.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -882,6 +883,7 @@ class PinyinSorter(_PluginBase):
     _letter_source: str = "title"
     _fallback_letter: str = "#"
     _copy_mode: str = "move"
+    _refresh_delay: int = 0
     _refresh: bool = True
     _refresh_mode: str = "library"
     _notify: bool = False
@@ -915,9 +917,13 @@ class PinyinSorter(_PluginBase):
         )
         fallback = str(config.get("fallback_letter") or "#").strip()
         self._fallback_letter = fallback[:4] or "#"
-        self._copy_mode = (
-            "copy" if str(config.get("copy_mode") or "move") == "copy" else "move"
-        )
+        mode = str(config.get("copy_mode") or "move")
+        self._copy_mode = mode if mode in ("copy", "hardlink") else "move"
+        try:
+            self._refresh_delay = int(str(config.get("refresh_delay") or 0))
+        except (TypeError, ValueError):
+            self._refresh_delay = 0
+        self._refresh_delay = max(0, min(3600, self._refresh_delay))
         self._refresh = bool(config.get("refresh", True))
         self._refresh_mode = (
             "item" if str(config.get("refresh_mode") or "library") == "item" else "library"
@@ -1070,8 +1076,21 @@ class PinyinSorter(_PluginBase):
         if not self._refresh:
             return
         target = self._refresh_target_dir(record, transferinfo)
-        await anyio.to_thread.run_sync(
-            functools.partial(self._refresh_media_servers, mediainfo, target)
+        if self._refresh_delay <= 0:
+            await anyio.to_thread.run_sync(
+                functools.partial(self._refresh_media_servers, mediainfo, target)
+            )
+            return
+        timer = threading.Timer(
+            self._refresh_delay,
+            functools.partial(self._refresh_media_servers, mediainfo, target),
+        )
+        timer.daemon = True
+        timer.start()
+        logger.info(
+            "[PinyinSorter] 已安排 %s 秒后刷新媒体库：%s",
+            self._refresh_delay,
+            target,
         )
 
     @staticmethod
@@ -1859,6 +1878,13 @@ class PinyinSorter(_PluginBase):
             if self._copy_mode == "copy":
                 shutil.copy2(source, target)
                 return "success", "已复制"
+            if self._copy_mode == "hardlink":
+                os.link(source, target)
+                try:
+                    source.unlink()
+                    return "success", "已硬链接（源文件已删除，省空间）"
+                except OSError:
+                    return "success", "已硬链接（源文件删除失败，已保留）"
             shutil.move(str(source), str(target))
             return "success", "已移动"
         except Exception as error:  # pragma: no cover - IO 错误路径
@@ -1907,6 +1933,16 @@ class PinyinSorter(_PluginBase):
             if self._copy_mode == "copy":
                 shutil.copytree(source, target, symlinks=True)
                 return "success", "已复制"
+            if self._copy_mode == "hardlink":
+                for path in sorted(source.rglob("*")):
+                    dest = target / path.relative_to(source)
+                    if path.is_dir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(path, dest)
+                shutil.rmtree(source, ignore_errors=False)
+                return "success", "已硬链接（源目录已删除，省空间）"
             shutil.move(str(source), str(target))
             return "success", "已移动"
         except Exception as error:  # pragma: no cover - IO 错误路径
@@ -2211,6 +2247,7 @@ class PinyinSorter(_PluginBase):
             "letter_source": self._letter_source,
             "fallback_letter": self._fallback_letter,
             "copy_mode": self._copy_mode,
+            "refresh_delay": self._refresh_delay,
             "refresh": self._refresh,
             "refresh_mode": self._refresh_mode,
             "notify": self._notify,
@@ -2273,7 +2310,24 @@ class PinyinSorter(_PluginBase):
                                             "items": [
                                                 {"title": "移动（省空间）", "value": "move"},
                                                 {"title": "复制（保留原文件）", "value": "copy"},
+                                                {"title": "硬链接（同盘不占空间，删源）", "value": "hardlink"},
                                             ],
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "refresh_delay",
+                                            "label": "入库后刷新延迟（秒）",
+                                            "type": "number",
+                                            "hint": "0 = 立即刷新；媒体服务器来不及扫到新文件时可设 10~60 秒",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],
