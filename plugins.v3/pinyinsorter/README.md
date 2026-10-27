@@ -19,7 +19,7 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | --- | --- |
 | 插件 ID | `PinyinSorter`（= 类名） |
 | 名称 | 首字母归档 |
-| 版本 | 1.9.0（与 `package.v3.json` 一致） |
+| 版本 | 1.10.0（与 `package.v3.json` 一致） |
 | 入口 | `plugins.v3/pinyinsorter/__init__.py` |
 
 ## 下载直达字母目录
@@ -120,8 +120,9 @@ qBittorrent 的规则是：**同一磁力链接已经在列表里时，直接复
 | `tv_roots` | string（换行分隔） | 剧集库根目录 |
 | `letter_source` | `title` / `en_title` | 首字母取中文标题还是英文标题 |
 | `fallback_letter` | string | 数字/符号开头的归类目录，默认 `#` |
-| `copy_mode` | `move` / `copy` | 移动或复制（复制适合继续做种） |
+| `copy_mode` | `move` / `copy` / `hardlink` | 移动、复制或硬链接（硬链接同盘不占空间，建链后删源） |
 | `refresh` | bool | 入库后是否自动刷新媒体库 |
+| `refresh_delay` | int | 入库后延迟多少秒刷新，0 = 立即，上限 3600 |
 | `refresh_mode` | `library` / `item` | 整库扫描或只刷该条目 |
 | `notify` | bool | 归档后是否通过 MoviePilot 通知渠道发消息 |
 | `direct_letter` | bool | 下载直达：把下载器保存目录改成 `<基准目录>/<首字母>`（有保存目录就追加，没有才用下面这行） |
