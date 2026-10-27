@@ -40,14 +40,15 @@ moviepilot-local-plugins/
 ├── package.v3.json                       # 本地插件仓索引（v3 宿主读这个）
 ├── plugins.v3/
 │   └── pinyinsorter/                     # 目录名 = 插件类名小写
-│       └── __init__.py                   # 插件本体（类名 PinyinSorter = 插件 ID）
+│       ├── __init__.py                   # 插件本体（类名 PinyinSorter = 插件 ID）
+│       └── gb18030_table.py              # GB18030 首字母表数据块
 └── tests/
     └── v3/pinyinsorter/
         └── standalone_selftest.py        # 离线自测（桩模块替代宿主，零依赖）
 ```
 
 插件按官方 [V3 插件开发指南](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md) 编写：
-`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.10.0），
+`package.v3.json` 的 `version` 与历史版本、插件类 `plugin_version` 三处一致（1.11.0），
 `history` 当前版本在最上面；只从 `app.sdk.*` 导入；外部 API 声明 `auth: "apikey"`，
 页面按钮用 `auth: "bear"`；**零第三方依赖**（不需要 `pip install` 任何东西）。
 
