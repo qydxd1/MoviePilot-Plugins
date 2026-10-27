@@ -864,7 +864,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
     # 插件版本
-    plugin_version = "1.8.3"
+    plugin_version = "1.9.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -1049,7 +1049,11 @@ class PinyinSorter(_PluginBase):
     @eventmanager.register(EventType.TransferComplete)
     async def on_transfer_complete(self, event: Event) -> None:
         """
-        整理完成事件入口：下载完成后归档媒体单元目录，并刷新媒体库。
+        整理完成事件入口：入库后刷新媒体库（不论是否发生归档搬动）。
+
+        刷新时机是「入库」，不是「归档成功」：媒体已经进库就算数，哪怕目录
+        本来就在字母目录里、或者不在本插件管理的库根之下，也应当通知媒体
+        服务器刷新，避免 Emby/Jellyfin 看不到新内容。
 
         :param event: transfer.complete 事件
         """
@@ -1060,9 +1064,26 @@ class PinyinSorter(_PluginBase):
         transferinfo: Optional[TransferInfo] = data.get("transferinfo")
         if not mediainfo or not transferinfo or not transferinfo.success:
             return
-        await anyio.to_thread.run_sync(
-            functools.partial(self._handle_media_unit, mediainfo, transferinfo, True)
+        record = await anyio.to_thread.run_sync(
+            functools.partial(self._handle_media_unit, mediainfo, transferinfo, False)
         )
+        if not self._refresh:
+            return
+        target = self._refresh_target_dir(record, transferinfo)
+        await anyio.to_thread.run_sync(
+            functools.partial(self._refresh_media_servers, mediainfo, target)
+        )
+
+    @staticmethod
+    def _refresh_target_dir(
+        record: Optional[Dict[str, Any]],
+        transferinfo: TransferInfo,
+    ) -> Optional[Path]:
+        """算出入库后要刷新给媒体服务器的目标路径。"""
+        if record and record.get("status") == "success" and record.get("target"):
+            target = Path(str(record["target"]))
+            return target.parent if target.suffix else target
+        return PinyinSorter._resolve_target_dir(transferinfo)
 
     @eventmanager.register(ChainEventType.ResourceDownload)
     def on_resource_download(self, event: Event) -> None:
@@ -1601,7 +1622,7 @@ class PinyinSorter(_PluginBase):
 
         :param mediainfo: 识别出的媒体信息
         :param transferinfo: 整理结果
-        :param refresh: 是否需要刷新媒体库
+        :param refresh: 是否由本函数直接刷新媒体库（事件链路已统一改为入库后刷新）
         :return: 记录字典；跳过时返回 None
         """
         target_dir = self._resolve_target_dir(transferinfo)
@@ -1685,7 +1706,7 @@ class PinyinSorter(_PluginBase):
         :param mediainfo: 识别出的媒体信息
         :param source: 待归档的文件
         :param root: 命中的媒体库根目录
-        :param refresh: 是否需要刷新媒体库
+        :param refresh: 是否由本函数直接刷新媒体库（事件链路已统一改为入库后刷新）
         :return: 记录字典；跳过时返回 None
         """
         title = self._pick_title(mediainfo)
@@ -1774,7 +1795,7 @@ class PinyinSorter(_PluginBase):
         :param mediainfo: 识别出的媒体信息
         :param transferinfo: 整理结果
         :param root: 命中的媒体库根目录
-        :param refresh: 是否需要刷新媒体库
+        :param refresh: 是否由本函数直接刷新媒体库（事件链路已统一改为入库后刷新）
         :return: 记录字典；不适用时返回 None
         """
         media_file: Optional[Path] = None
@@ -2226,7 +2247,7 @@ class PinyinSorter(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
-                                        "props": {"model": "refresh", "label": "归档后刷新媒体库"},
+                                        "props": {"model": "refresh", "label": "入库后自动刷新媒体库"},
                                     }
                                 ],
                             },
