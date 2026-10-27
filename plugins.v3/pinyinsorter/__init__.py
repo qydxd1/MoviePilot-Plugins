@@ -457,9 +457,9 @@ class PinyinSorter(_PluginBase):
     # 插件名称
     plugin_name = "首字母归档"
     # 插件描述
-    plugin_desc = "整理完成后把媒体目录按标题首字母归档，并刷新 Emby/Jellyfin/Plex 媒体库；可选下载时就落到首字母目录、下载时按识别结果规范命名（电影建标题目录、剧集分季）"
+    plugin_desc = "整理完成后按标题首字母归档并刷新 Emby/Jellyfin/Plex；支持下载直达字母目录、下载时规范命名（电影建标题目录、剧集分季）、硬链接归档"
     # 插件版本
-    plugin_version = "1.11.0"
+    plugin_version = "1.12.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
