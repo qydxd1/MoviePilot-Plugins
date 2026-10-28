@@ -52,7 +52,39 @@ from app.sdk.media import MediaInfo
 from app.sdk.plugin import _PluginBase
 from app.sdk.services import MediaServerHelper
 
-from .gb18030_table import GB18030_TABLE_B64
+_VENDOR_WHEEL = (
+    Path(__file__).resolve().parent / "vendor" / "pinyinsorter_gb18030-0.1.0-py3-none-any.whl"
+)
+
+
+def _load_gb18030_table_b64() -> str:
+    """读取 GB18030 首字母表数据。
+
+    优先使用已安装的 ``pinyinsorter_gb18030`` 包，其次读插件 ``vendor/``
+    下随包分发的 wheel，最后回退到插件目录里的 ``gb18030_table.py``，
+    保证三种部署形态都能启动。
+    """
+    try:
+        from pinyinsorter_gb18030 import GB18030_TABLE_B64 as table
+    except ImportError:
+        table = ""
+    if table:
+        return table
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(_VENDOR_WHEEL) as archive:
+            source = archive.read("pinyinsorter_gb18030/__init__.py").decode("utf-8")
+        start = source.index('GB18030_TABLE_B64 = "') + len('GB18030_TABLE_B64 = "')
+        return source[start:source.index('"', start)]
+    except Exception:  # pragma: no cover - vendor 缺失时回退本地模块
+        pass
+    from .gb18030_table import GB18030_TABLE_B64 as table
+
+    return table
+
+
+GB18030_TABLE_B64 = _load_gb18030_table_b64()
 
 # 记录最多保留条数
 _RECORD_LIMIT = 200
@@ -459,7 +491,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后按标题首字母归档并刷新 Emby/Jellyfin/Plex；支持下载直达字母目录、下载时规范命名（电影建标题目录、剧集分季）、硬链接归档"
     # 插件版本
-    plugin_version = "1.12.0"
+    plugin_version = "2.0.0"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
