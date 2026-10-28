@@ -491,7 +491,7 @@ class PinyinSorter(_PluginBase):
     # 插件描述
     plugin_desc = "整理完成后按标题首字母归档并刷新 Emby/Jellyfin/Plex；支持下载直达字母目录、下载时规范命名（电影建标题目录、剧集分季）、硬链接归档"
     # 插件版本
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     # 插件作者
     plugin_author = "qydxd1"
     # 作者主页
@@ -1764,6 +1764,14 @@ class PinyinSorter(_PluginBase):
                 "description": "给插件页面按钮用：立即刷新一次媒体库",
             },
             {
+                "path": "/refresh_item_test",
+                "endpoint": self.refresh_item_test,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "按条目刷新测试",
+                "description": "传 title/year/type/category/path，直接调用媒体服务器的按条目刷新接口并返回结果（排查「仅刷新该条目」是否生效）",
+            },
+            {
                 "path": "/download_events",
                 "endpoint": self.get_resource_events,
                 "methods": ["GET"],
@@ -1781,6 +1789,70 @@ class PinyinSorter(_PluginBase):
     def get_records(self) -> Dict[str, Any]:
         """返回最近归档记录。"""
         return self._envelope(True, "", list(self._records))
+
+    def refresh_item_test(
+        self,
+        title: str = "",
+        year: str = "",
+        type: str = "movie",
+        category: str = "",
+        path: str = "",
+    ) -> Dict[str, Any]:
+        """按条目刷新测试：把给定媒体信息直接交给媒体服务器的 refresh_library_by_items。"""
+        media_type = MediaType.TV if str(type).lower() in ("tv", "电视剧") else MediaType.MOVIE
+        try:
+            item = RefreshMediaItem(
+                title=title or None,
+                year=str(year) or None,
+                type=media_type,
+                category=category or None,
+                target_path=Path(path) if path else None,
+            )
+        except Exception as error:
+            return self._envelope(False, f"构造刷新条目失败：{error}")
+        results: List[Dict[str, Any]] = []
+        try:
+            services = MediaServerHelper().get_services() or {}
+        except Exception as error:
+            return self._envelope(False, f"获取媒体服务器失败：{error}")
+        for name, service in services.items():
+            instance = getattr(service, "instance", None)
+            if instance is None:
+                results.append({"server": name, "supported": False, "reason": "未启用或不可用"})
+                continue
+            refresh = getattr(instance, "refresh_library_by_items", None)
+            if not callable(refresh):
+                results.append(
+                    {"server": name, "supported": False, "reason": "不支持按条目刷新，插件会退整库"}
+                )
+                continue
+            try:
+                value = refresh([item])
+                results.append({"server": name, "supported": True, "result": value})
+                logger.info(
+                    "[PinyinSorter] 按条目刷新测试：%s -> %s（%s %s）",
+                    name,
+                    value,
+                    title,
+                    year,
+                )
+            except Exception as error:
+                results.append({"server": name, "supported": True, "error": str(error)})
+                logger.warning("[PinyinSorter] 按条目刷新测试失败：%s -> %s", name, error)
+        return self._envelope(
+            True,
+            "已按条目请求刷新",
+            {
+                "item": {
+                    "title": title,
+                    "year": year,
+                    "type": media_type.value,
+                    "category": category,
+                    "path": path,
+                },
+                "results": results,
+            },
+        )
 
     async def scan(self, dry_run: bool = True) -> Dict[str, Any]:
         """扫描并归档已存在的媒体目录（首次迁移用）。"""
