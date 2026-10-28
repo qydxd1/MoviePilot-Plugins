@@ -10,8 +10,9 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 
 ## 依赖
 
-无第三方依赖。首字母由插件内置的 GB18030 汉字表计算（42915 个汉字，含扩展 A/B 与兼容汉字，
-约 50KB base64 压缩在源码里，首次使用时解压一次）。
+无第三方依赖。首字母由插件内置的 GB18030 汉字表计算（42915 个汉字，含扩展 A/B 与兼容汉字）。
+数据有三种形态，加载顺序为：已安装的 `pinyinsorter_gb18030` 包 → 插件 `vendor/`
+目录下随包分发的 wheel → 本地 `gb18030_table.py`，任一可用即可启动。
 
 ## 类属性
 
@@ -19,9 +20,9 @@ MoviePilot v3 插件。订阅 `transfer.complete` 事件，在 MoviePilot 完成
 | --- | --- |
 | 插件 ID | `PinyinSorter`（= 类名） |
 | 名称 | 首字母归档 |
-| 版本 | 1.12.0（与 `package.v3.json` 一致） |
+| 版本 | 2.0.0（与 `package.v3.json` 一致） |
 | 入口 | `plugins.v3/pinyinsorter/__init__.py` |
-| 数据 | `plugins.v3/pinyinsorter/gb18030_table.py`（GB18030 首字母表，base64 数据块） |
+| 数据 | `gb18030_table.py`（本地表）+ `vendor/pinyinsorter_gb18030-0.1.0-py3-none-any.whl`（wheel 兜底） |
 
 ## 下载直达字母目录
 
