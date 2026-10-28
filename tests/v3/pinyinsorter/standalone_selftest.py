@@ -895,6 +895,10 @@ try:
     check("onlyonce snapshot reset", plugin._config_snapshot.get("onlyonce"), False)
     check("onlyonce config saved", plugin._config.get("onlyonce"), False)
     plugin._schedule_once_run = original_schedule
+    check("gb18030 table loaded", bool(plugin_module.GB18030_TABLE_B64), True)
+    from_vendor = plugin_module._load_gb18030_table_b64()
+    check("gb18030 table length matches", len(from_vendor), len(plugin_module.GB18030_TABLE_B64))
+    check("gb18030 first letter 阿", plugin_module.first_letter("阿凡达"), "A")
 finally:
     shutil.rmtree(workdir, ignore_errors=True)
 
